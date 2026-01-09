@@ -1,1 +1,24 @@
-{"solar_panels":[{"box_2d":[0.818,0.0,1.0,0.255],"confidence":"high"},{"box_2d":[0.773,0.444,0.93,0.556],"confidence":"high"},{"box_2d":[0.703,0.614,0.843,0.822],"confidence":"high"},{"box_2d":[0.493,0.028,0.714,0.078],"confidence":"high"}]}
+{
+  "solar_panels": [
+    {
+      "box_2d": [0.700, 0.612, 0.840, 0.820],
+      "confidence": "high"
+    },
+    {
+      "box_2d": [0.770, 0.442, 0.930, 0.555],
+      "confidence": "high"
+    },
+    {
+      "box_2d": [0.815, 0.000, 0.885, 0.170],
+      "confidence": "high"
+    },
+    {
+      "box_2d": [0.885, 0.000, 0.960, 0.085],
+      "confidence": "high"
+    },
+    {
+      "box_2d": [0.900, 0.150, 1.000, 0.250],
+      "confidence": "high"
+    }
+  ]
+}

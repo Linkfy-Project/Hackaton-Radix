@@ -1,7 +1,7 @@
 """
 Este script cria uma interface web usando Streamlit e Folium para exibir um mapa interativo rico.
 Ele integra dados geográficos reais da LIGHT (via GDB), o contorno do Rio de Janeiro (via geobr),
-gera um diagrama de Voronoi e utiliza FastMarkerCluster para exibir milhões de pontos do CNEFE_RJ.
+gera um diagrama de Voronoi e utiliza dados pré-processados do CNEFE para exibir estatísticas por área.
 """
 
 import streamlit as st
@@ -13,13 +13,26 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import box, MultiPoint
 from shapely.ops import voronoi_diagram
-from folium.plugins import Fullscreen, MousePosition, MeasureControl, FastMarkerCluster
+from folium.plugins import Fullscreen, MousePosition, MeasureControl
+import os
 
 # --- CONFIGURAÇÕES ---
 CAMINHO_GDB = r"LIGHT_382_2021-09-30_M10_20231218-2133.gdb"
-CAMINHO_CNEFE = "CNEFE_RJ.csv"
+ARQUIVO_STATS = "cnefe_stats_by_sub.csv"
 NOME_CAMADA_SUB = 'SUB' 
 NOME_CAMADA_TR = 'UNTRS'
+
+# Dicionário de Espécies para o Popup
+DIC_ESPECIES = {
+    1: "Domicílio Particular",
+    2: "Domicílio Coletivo",
+    3: "Estabelecimento Agropecuário",
+    4: "Estabelecimento de Ensino",
+    5: "Estabelecimento de Saúde",
+    6: "Estabelecimento de Outras Finalidades",
+    7: "Estabelecimento Religioso",
+    8: "Unidade em Construção"
+}
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="Mapa LIGHT & CNEFE RJ - Big Data", layout="wide")
@@ -58,32 +71,34 @@ def get_light_data():
         gdf_voronoi = gpd.GeoDataFrame(geometry=list(voronoi_geo.geoms), crs="EPSG:4326")
         voronoi_recortado = gpd.clip(gdf_voronoi, rj_shape)
         
-        return rj_shape, gdf_sub_rj, voronoi_recortado
+        # Associar Voronoi ao COD_ID
+        voronoi_com_sub = gpd.sjoin(voronoi_recortado, gdf_sub_rj[['COD_ID', 'NOM', 'POTENCIA_CALCULADA', 'geometry']], how='left', predicate='contains')
+        
+        return rj_shape, gdf_sub_rj, voronoi_com_sub
     except Exception as e:
         print(f"DEBUG ERROR (LIGHT): {e}")
         return rj_shape, None, None
 
 @st.cache_data
-def get_cnefe_points(limit=100000):
+def get_preprocessed_cnefe():
     """
-    Lê as coordenadas do CNEFE. 
-    Limitado a 100k pontos para manter a performance do navegador, 
-    mas usa FastMarkerCluster para eficiência.
+    Lê o arquivo de estatísticas pré-processado.
     """
-    print(f"DEBUG: Carregando {limit} pontos do CNEFE...")
+    print("DEBUG: Carregando dados pré-processados do CNEFE...")
     try:
-        # Lemos apenas as colunas necessárias para economizar memória
-        df = pd.read_csv(CAMINHO_CNEFE, sep=';', usecols=['LATITUDE', 'LONGITUDE'], nrows=limit)
-        # Remove nulos
-        df = df.dropna(subset=['LATITUDE', 'LONGITUDE'])
-        # Retorna lista de [lat, lon] para o FastMarkerCluster
-        return df[['LATITUDE', 'LONGITUDE']].values.tolist()
+        if not os.path.exists(ARQUIVO_STATS):
+            return None
+            
+        df_stats = pd.read_csv(ARQUIVO_STATS, index_col='COD_ID')
+        df_stats.index = df_stats.index.astype(str)
+        
+        return df_stats
     except Exception as e:
-        print(f"DEBUG ERROR (CNEFE): {e}")
-        return []
+        print(f"DEBUG ERROR (CNEFE Load): {e}")
+        return None
 
 @st.cache_resource
-def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_points):
+def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
     """
     Cria o objeto de mapa Folium.
     """
@@ -113,11 +128,64 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_points):
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'cadetblue', 'darkpurple', 'pink', 'lightblue', 'lightgreen', 'gray']
         for i, row in _voronoi_recortado.iterrows():
             color = colors[i % len(colors)]
+            
+            cod_id = str(row['COD_ID'])
+            stats_html = f"<b>Área da SE: {row['NOM'] or cod_id}</b><br><br>"
+            stats_html += "<b>Estatísticas CNEFE:</b><br>"
+            
+            if _cnefe_stats is not None and cod_id in _cnefe_stats.index:
+                row_stats = _cnefe_stats.loc[cod_id]
+                total_consumidores = 0
+                
+                # Categorias para o resumo
+                residenciais = 0
+                comerciais = 0
+                
+                # Detalhamento por espécie
+                detalhes_res = ""
+                detalhes_com = ""
+                
+                for esp_code, count in row_stats.items():
+                    if count > 0:
+                        esp_code_int = int(float(esp_code))
+                        esp_nome = DIC_ESPECIES.get(esp_code_int, f"Espécie {esp_code}")
+                        
+                        # Somar ao total se não for espécie 8 (Unidade em Construção)
+                        if esp_code_int != 8:
+                            total_consumidores += int(count)
+                            
+                            # Classificação
+                            if esp_code_int in [1, 2]:
+                                residenciais += int(count)
+                                detalhes_res += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
+                            else:
+                                comerciais += int(count)
+                                detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
+                        
+                        stats_html += f"- {esp_nome}: {int(count)}<br>"
+                
+                stats_html += f"<b>Total de Endereços (Consumidores): {total_consumidores}</b>"
+                
+                # Adicionar Resumo por Classe com cores (Simplificado)
+                if total_consumidores > 0:
+                    perc_res = (residenciais / total_consumidores) * 100
+                    perc_com = (comerciais / total_consumidores) * 100
+                    
+                    stats_html += f"<div style='color: green;'><br><b>- Classe Residencial ({perc_res:.1f}%)</b><br>"
+                    stats_html += f"Subtotal Residencial: {residenciais}</div>"
+                    
+                    stats_html += f"<div style='color: red;'><b>- Classe Comercial / Não Residencial ({perc_com:.1f}%)</b><br>"
+                    stats_html += f"Subtotal Comercial/Não Residencial: {comerciais}</div>"
+            else:
+                stats_html += "Sem dados processados para esta área.<br>"
+
             folium.GeoJson(
                 row.geometry,
                 style_function=lambda x, color=color: {
                     'fillColor': color, 'color': 'white', 'weight': 1, 'fillOpacity': 0.2
-                }
+                },
+                tooltip=f"Área: {row['NOM'] or cod_id}",
+                popup=folium.Popup(stats_html, max_width=300)
             ).add_to(voronoi_group)
         
     # Subestações LIGHT
@@ -128,23 +196,63 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_points):
             radius = 4 + (pot / 50.0)
             if radius > 15: radius = 15
             nome_se = str(row.get('NOM') or row.get('NOME') or row.get('COD_ID'))
+            cod_id = str(row['COD_ID'])
+            
+            stats_html = f"<b>SE: {nome_se}</b><br>Potência: {pot:.2f} MVA<br><br>"
+            stats_html += "<b>Estatísticas CNEFE na Área:</b><br>"
+            
+            if _cnefe_stats is not None and cod_id in _cnefe_stats.index:
+                row_stats = _cnefe_stats.loc[cod_id]
+                total_consumidores = 0
+                
+                # Categorias para o resumo
+                residenciais = 0
+                comerciais = 0
+                
+                # Detalhamento por espécie
+                detalhes_res = ""
+                detalhes_com = ""
+                
+                for esp_code, count in row_stats.items():
+                    if count > 0:
+                        esp_code_int = int(float(esp_code))
+                        esp_nome = DIC_ESPECIES.get(esp_code_int, f"Espécie {esp_code}")
+                        
+                        # Somar ao total se não for espécie 8 (Unidade em Construção)
+                        if esp_code_int != 8:
+                            total_consumidores += int(count)
+                            
+                            # Classificação
+                            if esp_code_int in [1, 2]:
+                                residenciais += int(count)
+                                detalhes_res += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
+                            else:
+                                comerciais += int(count)
+                                detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
+                        
+                        stats_html += f"- {esp_nome}: {int(count)}<br>"
+                
+                stats_html += f"<b>Total de Endereços (Consumidores): {total_consumidores}</b>"
+                
+                # Adicionar Resumo por Classe com cores (Simplificado)
+                if total_consumidores > 0:
+                    perc_res = (residenciais / total_consumidores) * 100
+                    perc_com = (comerciais / total_consumidores) * 100
+                    
+                    stats_html += f"<div style='color: green;'><br><b>- Classe Residencial ({perc_res:.1f}%)</b><br>"
+                    stats_html += f"Subtotal Residencial: {residenciais}</div>"
+                    
+                    stats_html += f"<div style='color: red;'><b>- Classe Comercial / Não Residencial ({perc_com:.1f}%)</b><br>"
+                    stats_html += f"Subtotal Comercial/Não Residencial: {comerciais}</div>"
+            else:
+                stats_html += "Sem dados processados.<br>"
+
             folium.CircleMarker(
                 location=[row.geometry.y, row.geometry.x],
                 radius=radius, color='white', weight=1, fill=True, fill_color='red', fill_opacity=1,
-                popup=f"<b>{nome_se}</b><br>Potência: {pot:.2f} MVA",
+                popup=folium.Popup(stats_html, max_width=300),
                 tooltip=f"SE: {nome_se}"
             ).add_to(sub_group)
-
-    # CNEFE Big Data (FastMarkerCluster)
-    if _cnefe_points:
-        # FastMarkerCluster é extremamente eficiente para milhares de pontos
-        # Ele agrupa os pontos em clusters que se expandem ao dar zoom
-        cluster = FastMarkerCluster(
-            data=_cnefe_points,
-            name="Endereços CNEFE (Cluster)",
-            callback=None # Pode ser customizado para ícones menores
-        )
-        m.add_child(cluster)
 
     # Controles
     Fullscreen().add_to(m)
@@ -155,26 +263,28 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_points):
     return m
 
 def main():
-    st.title("⚡ Big Data: LIGHT & CNEFE RJ")
+    st.title("⚡ Big Data: LIGHT & CNEFE RJ (Otimizado)")
     st.markdown("""
-    Visualização de **Big Data**: Subestações reais e **milhares de endereços do CNEFE**.
-    Os pontos azuis representam clusters de residências que se expandem conforme você dá zoom.
+    Visualização de **Big Data** com dados pré-processados. 
+    Clique nas áreas de Voronoi ou nas subestações para ver a **contagem de espécies** de endereços.
     """)
     
-    # Sidebar para controle de volume de dados
-    num_pontos = st.sidebar.slider("Quantidade de pontos CNEFE", 1000, 500000, 100000, step=10000)
-    
-    with st.spinner("Processando milhões de registros..."):
+    if not os.path.exists(ARQUIVO_STATS):
+        st.warning("⚠️ Arquivos pré-processados não encontrados! Execute `python pre_process_cnefe.py` primeiro.")
+        return
+
+    with st.spinner("Carregando mapa e estatísticas..."):
         try:
             rj_shape, gdf_sub, voronoi_recortado = get_light_data()
-            cnefe_points = get_cnefe_points(limit=num_pontos)
+            cnefe_stats = get_preprocessed_cnefe()
             
-            m = create_map_object(rj_shape, gdf_sub, voronoi_recortado, cnefe_points)
+            m = create_map_object(rj_shape, gdf_sub, voronoi_recortado, cnefe_stats)
             
             st_folium(m, width=1200, height=700, returned_objects=[], use_container_width=True)
             
         except Exception as e:
-            st.error(f"Erro ao processar dados: {e}")
+            st.error(f"Erro ao carregar mapa: {e}")
+            st.exception(e)
 
 if __name__ == "__main__":
     main()
