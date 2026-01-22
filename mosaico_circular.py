@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- CONFIGURAÇÕES GLOBAIS ---
 LAT_CENTRO = -23.005435  # Parque Ibirapuera
 LON_CENTRO = -43.342231
-RAIO_METROS = 200      # Raio exato em metros
+RAIO_METROS = 1000      # Raio exato em metros
 ZOOM = 20              # Zoom máximo
 PASTA_TILES = "tiles_cache"
 ARQUIVO_SAIDA = "mosaico_circular_preciso.png"

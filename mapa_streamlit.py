@@ -56,6 +56,10 @@ def get_light_data():
         gdf_sub = gdf_sub.merge(potencia_por_sub, on='COD_ID', how='left')
         gdf_sub['POTENCIA_CALCULADA'] = gdf_sub['POTENCIA_CALCULADA'].fillna(0)
         
+        # Garantir que POT_NOM existe (pode vir do GDB ou ser calculada)
+        if 'POT_NOM' not in gdf_sub.columns:
+            gdf_sub['POT_NOM'] = 0
+        
         gdf_sub_projected = gdf_sub.to_crs("EPSG:31983")
         gdf_sub['geometry'] = gdf_sub_projected.geometry.centroid.to_crs("EPSG:4326")
         gdf_sub = gdf_sub.to_crs("EPSG:4326")
@@ -72,7 +76,7 @@ def get_light_data():
         voronoi_recortado = gpd.clip(gdf_voronoi, rj_shape)
         
         # Associar Voronoi ao COD_ID
-        voronoi_com_sub = gpd.sjoin(voronoi_recortado, gdf_sub_rj[['COD_ID', 'NOM', 'POTENCIA_CALCULADA', 'geometry']], how='left', predicate='contains')
+        voronoi_com_sub = gpd.sjoin(voronoi_recortado, gdf_sub_rj[['COD_ID', 'NOM', 'POTENCIA_CALCULADA', 'POT_NOM', 'geometry']], how='left', predicate='contains')
         
         return rj_shape, gdf_sub_rj, voronoi_com_sub
     except Exception as e:
@@ -130,8 +134,13 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
             color = colors[i % len(colors)]
             
             cod_id = str(row['COD_ID'])
-            stats_html = f"<b>Área da SE: {row['NOM'] or cod_id}</b><br><br>"
-            stats_html += "<b>Estatísticas CNEFE:</b><br>"
+            pot_nom = row.get('POT_NOM', 0)
+            
+            stats_html = f"<b>Área da SE: {row['NOM'] or cod_id}</b><br>"
+            stats_html += f"Potência: {row['POTENCIA_CALCULADA']:.2f} MVA<br>"
+            if pot_nom and pot_nom > 0:
+                stats_html += f"Potência Nominal: {pot_nom:.2f} MVA<br>"
+            stats_html += "<br><b>Estatísticas CNEFE:</b><br>"
             
             if _cnefe_stats is not None and cod_id in _cnefe_stats.index:
                 row_stats = _cnefe_stats.loc[cod_id]
@@ -145,9 +154,34 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
                 detalhes_res = ""
                 detalhes_com = ""
                 
-                for esp_code, count in row_stats.items():
+                # Variáveis para o detalhamento de "Outras Finalidades"
+                count_outras = 0
+                count_osm_shop = 0
+                count_osm_ind = 0
+                
+                # Primeiro pass: capturar dados do OSM e Outras Finalidades
+                for col in row_stats.index:
+                    val = row_stats[col]
+                    if col == 'OSM_SHOP':
+                        count_osm_shop = int(val)
+                    elif col == 'OSM_INDUSTRIAL':
+                        count_osm_ind = int(val)
+                    elif col == '6':
+                        count_outras = int(val)
+
+                # Segundo pass: construir o HTML
+                for esp_code in row_stats.index:
+                    count = row_stats[esp_code]
                     if count > 0:
-                        esp_code_int = int(float(esp_code))
+                        # Pular colunas do OSM na listagem principal, elas serão usadas no detalhamento da espécie 6
+                        if esp_code in ['OSM_SHOP', 'OSM_INDUSTRIAL']:
+                            continue
+                            
+                        try:
+                            esp_code_int = int(float(esp_code))
+                        except ValueError:
+                            continue
+                            
                         esp_nome = DIC_ESPECIES.get(esp_code_int, f"Espécie {esp_code}")
                         
                         # Somar ao total se não for espécie 8 (Unidade em Construção)
@@ -160,9 +194,29 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
                                 detalhes_res += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
                             else:
                                 comerciais += int(count)
-                                detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
+                                if esp_code_int == 6: # Estabelecimento de Outras Finalidades
+                                    # Detalhamento customizado no resumo
+                                    outros_calc = count_outras - (count_osm_shop + count_osm_ind)
+                                    if outros_calc < 0: outros_calc = 0
+                                    
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {count_outras}<br>"
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;indústria: {count_osm_ind}<br>"
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;comércio: {count_osm_shop}<br>"
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;outros: {outros_calc}<br>"
+                                else:
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
                         
-                        stats_html += f"- {esp_nome}: {int(count)}<br>"
+                        # Listagem original
+                        if esp_code_int != 6:
+                             stats_html += f"- {esp_nome}: {int(count)}<br>"
+                        else:
+                             outros_calc = count_outras - (count_osm_shop + count_osm_ind)
+                             if outros_calc < 0: outros_calc = 0
+                             
+                             stats_html += f"- {esp_nome}: {count_outras}<br>"
+                             stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;indústria: {count_osm_ind}<br>"
+                             stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;comércio: {count_osm_shop}<br>"
+                             stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;outros: {outros_calc}<br>"
                 
                 stats_html += f"<b>Total de Endereços (Consumidores): {total_consumidores}</b>"
                 
@@ -174,7 +228,23 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
                     stats_html += f"<div style='color: green;'><br><b>- Classe Residencial ({perc_res:.1f}%)</b><br>"
                     stats_html += f"Subtotal Residencial: {residenciais}</div>"
                     
-                    stats_html += f"<div style='color: red;'><b>- Classe Comercial / Não Residencial ({perc_com:.1f}%)</b><br>"
+                    stats_html += f"<div style='color: red;'><b>- Não Residencial ({perc_com:.1f}%)</b><br>"
+                    
+                    # Detalhamento de Comercial/Não Residencial com percentuais
+                    outros_calc = count_outras - (count_osm_shop + count_osm_ind)
+                    if outros_calc < 0: outros_calc = 0
+                    
+                    # Outros comércios/serviços do CNEFE (espécies 3, 4, 5, 7)
+                    outros_cnefe = comerciais - count_outras
+                    total_outros_final = outros_calc + outros_cnefe
+                    
+                    perc_ind = (count_osm_ind / total_consumidores) * 100
+                    perc_shop = (count_osm_shop / total_consumidores) * 100
+                    perc_outros = (total_outros_final / total_consumidores) * 100
+                    
+                    stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;Industrial: {count_osm_ind} ({perc_ind:.1f}%)<br>"
+                    stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;Comercial: {count_osm_shop} ({perc_shop:.1f}%)<br>"
+                    stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;Outros: {total_outros_final} ({perc_outros:.1f}%)<br>"
                     stats_html += f"Subtotal Comercial/Não Residencial: {comerciais}</div>"
             else:
                 stats_html += "Sem dados processados para esta área.<br>"
@@ -197,9 +267,12 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
             if radius > 15: radius = 15
             nome_se = str(row.get('NOM') or row.get('NOME') or row.get('COD_ID'))
             cod_id = str(row['COD_ID'])
+            pot_nom = row.get('POT_NOM', 0) # Tenta pegar a potência nominal original se existir
             
-            stats_html = f"<b>SE: {nome_se}</b><br>Potência: {pot:.2f} MVA<br><br>"
-            stats_html += "<b>Estatísticas CNEFE na Área:</b><br>"
+            stats_html = f"<b>SE: {nome_se}</b><br>Potência Calculada: {pot:.2f} MVA<br>"
+            if pot_nom > 0:
+                stats_html += f"Potência Nominal: {pot_nom:.2f} MVA<br>"
+            stats_html += "<br><b>Estatísticas CNEFE na Área:</b><br>"
             
             if _cnefe_stats is not None and cod_id in _cnefe_stats.index:
                 row_stats = _cnefe_stats.loc[cod_id]
@@ -213,9 +286,34 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
                 detalhes_res = ""
                 detalhes_com = ""
                 
-                for esp_code, count in row_stats.items():
+                # Variáveis para o detalhamento de "Outras Finalidades"
+                count_outras = 0
+                count_osm_shop = 0
+                count_osm_ind = 0
+                
+                # Primeiro pass: capturar dados do OSM e Outras Finalidades
+                for col in row_stats.index:
+                    val = row_stats[col]
+                    if col == 'OSM_SHOP':
+                        count_osm_shop = int(val)
+                    elif col == 'OSM_INDUSTRIAL':
+                        count_osm_ind = int(val)
+                    elif col == '6':
+                        count_outras = int(val)
+
+                # Segundo pass: construir o HTML
+                for esp_code in row_stats.index:
+                    count = row_stats[esp_code]
                     if count > 0:
-                        esp_code_int = int(float(esp_code))
+                        # Pular colunas do OSM na listagem principal, elas serão usadas no detalhamento da espécie 6
+                        if esp_code in ['OSM_SHOP', 'OSM_INDUSTRIAL']:
+                            continue
+                            
+                        try:
+                            esp_code_int = int(float(esp_code))
+                        except ValueError:
+                            continue
+                            
                         esp_nome = DIC_ESPECIES.get(esp_code_int, f"Espécie {esp_code}")
                         
                         # Somar ao total se não for espécie 8 (Unidade em Construção)
@@ -228,9 +326,29 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
                                 detalhes_res += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
                             else:
                                 comerciais += int(count)
-                                detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
+                                if esp_code_int == 6: # Estabelecimento de Outras Finalidades
+                                    # Detalhamento customizado no resumo
+                                    outros_calc = count_outras - (count_osm_shop + count_osm_ind)
+                                    if outros_calc < 0: outros_calc = 0
+                                    
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {count_outras}<br>"
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;indústria: {count_osm_ind}<br>"
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;comércio: {count_osm_shop}<br>"
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;outros: {outros_calc}<br>"
+                                else:
+                                    detalhes_com += f"&nbsp;&nbsp;&nbsp;&nbsp;{esp_nome}: {int(count)}<br>"
                         
-                        stats_html += f"- {esp_nome}: {int(count)}<br>"
+                        # Listagem original
+                        if esp_code_int != 6:
+                             stats_html += f"- {esp_nome}: {int(count)}<br>"
+                        else:
+                             outros_calc = count_outras - (count_osm_shop + count_osm_ind)
+                             if outros_calc < 0: outros_calc = 0
+                             
+                             stats_html += f"- {esp_nome}: {count_outras}<br>"
+                             stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;indústria: {count_osm_ind}<br>"
+                             stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;comércio: {count_osm_shop}<br>"
+                             stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;outros: {outros_calc}<br>"
                 
                 stats_html += f"<b>Total de Endereços (Consumidores): {total_consumidores}</b>"
                 
@@ -243,6 +361,22 @@ def create_map_object(_rj_shape, _gdf_sub, _voronoi_recortado, _cnefe_stats):
                     stats_html += f"Subtotal Residencial: {residenciais}</div>"
                     
                     stats_html += f"<div style='color: red;'><b>- Classe Comercial / Não Residencial ({perc_com:.1f}%)</b><br>"
+                    
+                    # Detalhamento de Comercial/Não Residencial com percentuais
+                    outros_calc = count_outras - (count_osm_shop + count_osm_ind)
+                    if outros_calc < 0: outros_calc = 0
+                    
+                    # Outros comércios/serviços do CNEFE (espécies 3, 4, 5, 7)
+                    outros_cnefe = comerciais - count_outras
+                    total_outros_final = outros_calc + outros_cnefe
+                    
+                    perc_ind = (count_osm_ind / total_consumidores) * 100
+                    perc_shop = (count_osm_shop / total_consumidores) * 100
+                    perc_outros = (total_outros_final / total_consumidores) * 100
+                    
+                    stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;Industrial: {count_osm_ind} ({perc_ind:.1f}%)<br>"
+                    stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;Comercial: {count_osm_shop} ({perc_shop:.1f}%)<br>"
+                    stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;Outros: {total_outros_final} ({perc_outros:.1f}%)<br>"
                     stats_html += f"Subtotal Comercial/Não Residencial: {comerciais}</div>"
             else:
                 stats_html += "Sem dados processados.<br>"
