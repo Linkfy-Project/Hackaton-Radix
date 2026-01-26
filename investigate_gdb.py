@@ -83,6 +83,28 @@ def investigate():
                 encontradas_em_untrd = pot_untrd[pot_untrd['SUB'].isin(subs_faltando)]
                 print(f"DEBUG: Subestações que faltavam e foram encontradas em UNTRD: {len(encontradas_em_untrd)}")
 
+        # Verificar EQTRS (Equipamentos de Transformação de Subestação?)
+        if 'EQTRS' in layers:
+            gdf_eqtrs = gpd.read_file(CAMINHO_GDB, layer='EQTRS')
+            print(f"DEBUG: Total em EQTRS: {len(gdf_eqtrs)}")
+            # Verificar colunas de EQTRS
+            print(f"DEBUG: Colunas em EQTRS: {gdf_eqtrs.columns.tolist()}")
+            
+            # Tentar encontrar relação com SUB
+            # Geralmente EQTRS tem uma chave estrangeira para UNTRS, e UNTRS para SUB
+            # Ou EQTRS pode ter direto o campo SUB ou similar.
+            
+            # Verificar se COD_ID de EQTRS bate com COD_ID de UNTRS
+            ids_eqtrs = set(gdf_eqtrs['COD_ID'].unique())
+            ids_untrs = set(gdf_tr['COD_ID'].unique())
+            intersecao = ids_eqtrs.intersection(ids_untrs)
+            print(f"DEBUG: Interseção entre EQTRS e UNTRS (COD_ID): {len(intersecao)}")
+            
+            if len(intersecao) > 0:
+                # Se batem, podemos pegar a potência de EQTRS e levar para UNTRS
+                gdf_tr_merged = gdf_tr.merge(gdf_eqtrs[['COD_ID', 'POT_NOM']], on='COD_ID', how='left', suffixes=('', '_EQ'))
+                print(f"DEBUG: UNTRS com POT_NOM original zero mas com POT_NOM em EQTRS: {len(gdf_tr_merged[(gdf_tr_merged['POT_NOM'] == 0) & (gdf_tr_merged['POT_NOM_EQ'] > 0)])}")
+
     except Exception as e:
         print(f"DEBUG ERROR: {e}")
 

@@ -13,9 +13,9 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- CONFIGURAÇÕES GLOBAIS ---
-LAT_CENTRO = -23.005435  # Parque Ibirapuera
-LON_CENTRO = -43.342231
-RAIO_METROS = 1000      # Raio exato em metros
+LAT_CENTRO = -22.989476   # Parque Ibirapuera
+LON_CENTRO = -43.247301
+RAIO_METROS = 280      # Raio exato em metros
 ZOOM = 20              # Zoom máximo
 PASTA_TILES = "tiles_cache"
 ARQUIVO_SAIDA = "mosaico_circular_preciso.png"
