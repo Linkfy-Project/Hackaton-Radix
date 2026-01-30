@@ -10,3 +10,7 @@ CNEFE_RJ.csv
 *.rar
 *.zip
 *.png
+/Dados Brutos
+Painel Solar/world/yolov5_X.pt
+New folder/audio_extraido.mp3
+New folder/monitoria.mkv
