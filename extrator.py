@@ -296,18 +296,34 @@ def run_pipeline():
         print("DEBUG: Tudo atualizado. Nada a fazer.")
         return
 
-    # 1. Gerar Áreas Reais (Convex Hull)
-    print("DEBUG: Gerando áreas reais de atendimento (Convex Hull)...")
+    # 1. Gerar Áreas Reais (Convex Hull ou Ponto Bufferizado)
+    print("DEBUG: Gerando áreas iniciais de atendimento...")
     poligonos_reais = []
     
     for data in all_subs_data:
+        gdf_subs = data['subs']
         gdf_tr = data['tr_geo']
+        
+        # Mapear transformadores por subestação para busca rápida
+        tr_por_sub = {}
         if gdf_tr is not None:
             for sub_id, grupo in gdf_tr.groupby('SUB'):
-                if len(grupo) >= 3:
-                    # Convex Hull: a 'casca' que envolve todos os pontos daquela subestação
-                    area = grupo.geometry.union_all().convex_hull
-                    poligonos_reais.append({'COD_ID': sub_id, 'geometry': area})
+                tr_por_sub[str(sub_id)] = grupo
+        
+        for _, sub_row in gdf_subs.iterrows():
+            sub_id = str(sub_row['COD_ID'])
+            grupo_tr = tr_por_sub.get(sub_id)
+            
+            if grupo_tr is not None and len(grupo_tr) >= 3:
+                # Caso normal: Convex Hull dos transformadores
+                area = grupo_tr.geometry.union_all().convex_hull
+            else:
+                # Caso especial (ex: Galeão): Subestação sem transformadores georeferenciados suficentes
+                # Criamos uma área mínima (buffer de ~10m) para garantir que a subestação exista no processo
+                # e possa "reclamar" território via Voronoi posteriormente.
+                area = sub_row.geometry.centroid.buffer(0.0001) 
+                
+            poligonos_reais.append({'COD_ID': sub_id, 'geometry': area})
 
     if not poligonos_reais:
         print("DEBUG ERROR: Não foi possível gerar áreas reais. Verifique as camadas de transformadores.")
@@ -328,8 +344,10 @@ def run_pipeline():
     # Lógica de Prioridade: Subestações que estão dentro de outras áreas devem ser processadas primeiro
     # para garantir que "esculpam" seu espaço e não sejam absorvidas pela subestação maior.
     print("DEBUG: Calculando hierarquia de contenção para resolução de conflitos...")
-    gdf_subs_pontos_temp = gpd.GeoDataFrame(gdf_subs_all, crs=all_subs_data[0]['subs'].crs).to_crs("EPSG:4326")
+    gdf_subs_pontos_temp = gpd.GeoDataFrame(gdf_subs_all, crs=all_subs_data[0]['subs'].crs)
+    gdf_subs_pontos_temp = gdf_subs_pontos_temp.to_crs("EPSG:31983")
     gdf_subs_pontos_temp['geometry'] = gdf_subs_pontos_temp.geometry.centroid
+    gdf_subs_pontos_temp = gdf_subs_pontos_temp.to_crs("EPSG:4326")
     gdf_subs_pontos_temp = gdf_subs_pontos_temp.drop_duplicates(subset=['COD_ID'])
     
     sindex = gdf_areas.sindex
