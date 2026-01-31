@@ -46,8 +46,8 @@ MAPA_CAMADAS_GDB = {
     },
     'ENEL': {
         'SUB': 'SUB', 
-        'TR_NOMINAL': 'UNTRMT',
-        'TR_GEOGRAFICO': 'UNTRMT' # Na ENEL parece ser a mesma camada
+        'TR_NOMINAL': 'UNTRAT', # Transformadores de AT para potência da subestação
+        'TR_GEOGRAFICO': 'UNTRMT' # Transformadores de MT para área real de atendimento
     }
 }
 
@@ -142,8 +142,8 @@ def provider_cnefe(areas_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
 
 def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
     """Extrai subestações, potências e pontos de transformadores para área real."""
-    nome = os.path.basename(caminho_gdb).upper()
-    dist = 'ENEL' if 'ENEL' in nome else 'LIGHT'
+    nome_arquivo = os.path.basename(caminho_gdb).upper()
+    dist = 'ENEL' if 'ENEL' in nome_arquivo else 'LIGHT'
     
     try:
         camadas = fiona.listlayers(caminho_gdb)
@@ -151,14 +151,20 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
         
         if cfg['SUB'] not in camadas: return None
         
-        # 1. Subestações (Pontos)
+        # 1. Subestações (Pontos ou Polígonos)
         gdf_sub = gpd.read_file(caminho_gdb, layer=cfg['SUB'])
+        
+        # Normalização de colunas: ENEL usa 'NOME', Light usa 'NOM'
+        if 'NOME' in gdf_sub.columns and 'NOM' not in gdf_sub.columns:
+            print(f"DEBUG: [Normalização] Renomeando 'NOME' para 'NOM' em {dist}")
+            gdf_sub = gdf_sub.rename(columns={'NOME': 'NOM'})
         
         # 2. Potência Nominal
         if cfg['TR_NOMINAL'] in camadas:
             gdf_tr_nom = gpd.read_file(caminho_gdb, layer=cfg['TR_NOMINAL'])
             col = 'SUB' if 'SUB' in gdf_tr_nom.columns else None
             if col:
+                # BDGD usa POT_NOM para potência nominal
                 pot = gdf_tr_nom.groupby(col)['POT_NOM'].sum().reset_index()
                 pot.columns = ['COD_ID', 'POTENCIA_CALCULADA']
                 gdf_sub = gdf_sub.merge(pot, on='COD_ID', how='left').fillna({'POTENCIA_CALCULADA': 0})
