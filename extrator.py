@@ -29,8 +29,8 @@ ARQUIVO_CONTROLE = os.path.join(PASTA_SAIDA, "controle_processamento.json")
 
 # Registro de Camadas de Dados (Data Providers)
 DATA_PROVIDERS_CONFIG = {
-    'OSM': True,
-    'CNEFE': True
+    'OSM': False,
+    'CNEFE': False
 }
 
 # Configurações de Caminhos Específicos
@@ -315,7 +315,7 @@ def run_pipeline():
 
     gdf_areas = gpd.GeoDataFrame(poligonos_reais, crs=all_subs_data[0]['subs'].crs).to_crs("EPSG:4326")
     
-    # 2. Resolver Sobreposições (Abordagem de Prioridade por Potência)
+    # 2. Resolver Sobreposições (Abordagem de Prioridade por Potência + Contenção)
     print("DEBUG: Resolvendo sobreposições territoriais...")
     # Unifica todos os pontos de subestações para pegar a potência
     gdf_subs_all = pd.concat([d['subs'] for d in all_subs_data], ignore_index=True)
@@ -324,7 +324,27 @@ def run_pipeline():
     # Merge potência com as áreas para ordenar
     gdf_areas['COD_ID'] = gdf_areas['COD_ID'].astype(str)
     gdf_areas = gdf_areas.merge(gdf_subs_all[['COD_ID', 'POTENCIA_CALCULADA', 'NOM', 'DISTRIBUIDORA']], on='COD_ID', how='left')
-    gdf_areas = gdf_areas.sort_values(by='POTENCIA_CALCULADA', ascending=False)
+    
+    # Lógica de Prioridade: Subestações que estão dentro de outras áreas devem ser processadas primeiro
+    # para garantir que "esculpam" seu espaço e não sejam absorvidas pela subestação maior.
+    print("DEBUG: Calculando hierarquia de contenção para resolução de conflitos...")
+    gdf_subs_pontos_temp = gpd.GeoDataFrame(gdf_subs_all, crs=all_subs_data[0]['subs'].crs).to_crs("EPSG:4326")
+    gdf_subs_pontos_temp['geometry'] = gdf_subs_pontos_temp.geometry.centroid
+    gdf_subs_pontos_temp = gdf_subs_pontos_temp.drop_duplicates(subset=['COD_ID'])
+    
+    sindex = gdf_areas.sindex
+    def get_containment_depth(row):
+        ponto = gdf_subs_pontos_temp[gdf_subs_pontos_temp['COD_ID'] == row['COD_ID']].geometry
+        if ponto.empty: return 0
+        ponto = ponto.iloc[0]
+        # Encontra polígonos que contêm este ponto
+        matches = sindex.query(ponto, predicate='within')
+        return len(matches) - 1 # Desconta o próprio polígono
+
+    gdf_areas['DEPTH'] = gdf_areas.apply(get_containment_depth, axis=1)
+    
+    # Ordenar por profundidade (mais internas primeiro) e depois por potência
+    gdf_areas = gdf_areas.sort_values(by=['DEPTH', 'POTENCIA_CALCULADA'], ascending=[False, False])
     
     areas_limpas = []
     geometria_acumulada = None
