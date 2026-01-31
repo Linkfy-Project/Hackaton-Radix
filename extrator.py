@@ -1,8 +1,9 @@
 """
 Este script é o motor de processamento de dados (ETL) do projeto.
 Ele extrai dados geográficos de múltiplos GDBs, gera áreas REAIS de influência 
-(via Convex Hull dos transformadores), resolve sobreposições territoriais
-e integra diversas camadas de estatísticas (CNEFE, OSM, etc.) em um arquivo GeoJSON unificado.
+(via Convex Hull dos transformadores), resolve sobreposições territoriais,
+preenche buracos entre subestações usando Voronoi e integra diversas camadas 
+de estatísticas (CNEFE, OSM, etc.) em um arquivo GeoJSON unificado.
 
 Arquitetura: Modular (Data Providers) para facilitar a adição de novas fontes de dados.
 """
@@ -10,8 +11,8 @@ Arquitetura: Modular (Data Providers) para facilitar a adição de novas fontes 
 import geopandas as gpd
 import geobr
 import pandas as pd
-from shapely.geometry import box, MultiPoint
-from shapely.ops import unary_union
+from shapely.geometry import box, MultiPoint, Point
+from shapely.ops import unary_union, voronoi_diagram
 import os
 import json
 import glob
@@ -138,6 +139,99 @@ def provider_cnefe(areas_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
     if not all_stats: return pd.DataFrame()
     return pd.concat(all_stats).groupby(['COD_ID', 'COD_ESPECIE'])['count'].sum().unstack(fill_value=0)
 
+# --- FUNÇÕES DE GEOPROCESSAMENTO AVANÇADO ---
+
+def preencher_buracos_rj(gdf_areas: gpd.GeoDataFrame, gdf_subs_pontos: gpd.GeoDataFrame, rj_shape: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Preenche áreas vazias dentro do estado do RJ seguindo a metodologia:
+    1. Buracos com 1 vizinho -> Absorvidos pelo vizinho.
+    2. Buracos com >1 vizinho -> Divididos via Voronoi entre as subestações em volta.
+    """
+    print("DEBUG: [Hole Filler] Iniciando preenchimento de áreas vazias no RJ...")
+    target_crs = "EPSG:31983" # SIRGAS 2000 / UTM zone 23S (RJ)
+    
+    # Backup do CRS original
+    original_crs = gdf_areas.crs
+    
+    # Conversão para CRS projetado para cálculos precisos
+    gdf_areas_proj = gdf_areas.to_crs(target_crs)
+    gdf_subs_pontos_proj = gdf_subs_pontos.to_crs(target_crs)
+    rj_poly = rj_shape.to_crs(target_crs).union_all()
+    
+    # 1. Identificar buracos (Área do Estado - União das Subestações)
+    subs_union = gdf_areas_proj.union_all()
+    buracos_total = rj_poly.difference(subs_union)
+    
+    if buracos_total.is_empty:
+        print("DEBUG: [Hole Filler] Nenhum buraco encontrado.")
+        return gdf_areas
+        
+    # Explodir MultiPolygon em Polygons individuais
+    if hasattr(buracos_total, 'geoms'):
+        lista_buracos = [g for g in buracos_total.geoms if g.area > 100] # Ignorar micro-áreas < 100m²
+    else:
+        lista_buracos = [buracos_total] if buracos_total.area > 100 else []
+        
+    print(f"DEBUG: [Hole Filler] {len(lista_buracos)} buracos significativos identificados.")
+    
+    # Dicionário para acumular as novas peças (geometrias) para cada subestação
+    pecas_por_sub = {str(sid): [geom] for sid, geom in zip(gdf_areas_proj['COD_ID'], gdf_areas_proj['geometry'])}
+    
+    for i, buraco in enumerate(lista_buracos):
+        # Encontrar subestações vizinhas (que tocam o buraco)
+        # Usamos um pequeno buffer de 2m para garantir a detecção de toque na fronteira
+        vizinhos = gdf_areas_proj[gdf_areas_proj.intersects(buraco.buffer(2))]
+        
+        if len(vizinhos) == 1:
+            # Caso 2: Fronteira com apenas uma subestação -> Absorção total
+            sub_id = str(vizinhos.iloc[0]['COD_ID'])
+            pecas_por_sub[sub_id].append(buraco)
+            
+        elif len(vizinhos) > 1:
+            # Caso 3: Fronteira com várias subestações -> Divisão via Voronoi
+            ids_vizinhos = vizinhos['COD_ID'].astype(str).tolist()
+            pontos_vizinhos = gdf_subs_pontos_proj[gdf_subs_pontos_proj['COD_ID'].astype(str).isin(ids_vizinhos)]
+            
+            if len(pontos_vizinhos) > 1:
+                # Gerar Voronoi baseado nos pontos das subestações vizinhas
+                coords = [p.coords[0] for p in pontos_vizinhos.geometry]
+                # Envelope para limitar o Voronoi (deve cobrir o buraco com folga)
+                envelope = buraco.buffer(5000).envelope
+                vor_collection = voronoi_diagram(MultiPoint(coords), envelope=envelope)
+                
+                # Intersectar cada célula do Voronoi com o buraco
+                for celula in vor_collection.geoms:
+                    intersecao = celula.intersection(buraco)
+                    if not intersecao.is_empty and intersecao.area > 1:
+                        # Atribuir a interseção à subestação cujo ponto está dentro desta célula
+                        for _, p_row in pontos_vizinhos.iterrows():
+                            if celula.contains(p_row.geometry) or celula.distance(p_row.geometry) < 0.1:
+                                sid = str(p_row['COD_ID'])
+                                pecas_por_sub[sid].append(intersecao)
+                                break
+            elif len(vizinhos) > 0:
+                # Fallback: Se não houver pontos suficientes para Voronoi, atribui ao primeiro vizinho
+                sub_id = str(vizinhos.iloc[0]['COD_ID'])
+                pecas_por_sub[sub_id].append(buraco)
+
+    # Unificar todas as peças de cada subestação e dissolver linhas internas
+    print("DEBUG: [Hole Filler] Dissolvendo fronteiras internas...")
+    novas_geoms = {}
+    for sid, pecas in pecas_por_sub.items():
+        # unary_union funde todas as geometrias em uma só, removendo linhas internas
+        # O buffer(0.1).buffer(-0.1) ajuda a eliminar slivers e garantir uma geometria limpa
+        geom_unificada = unary_union(pecas).buffer(0.1).buffer(-0.1)
+        novas_geoms[sid] = geom_unificada
+
+    # Atualizar o GeoDataFrame com as novas geometrias
+    gdf_areas_proj['geometry'] = gdf_areas_proj['COD_ID'].astype(str).map(novas_geoms)
+    
+    # Corrigir possíveis invalidezes geométricas após uniões
+    gdf_areas_proj['geometry'] = gdf_areas_proj['geometry'].make_valid()
+    
+    print("DEBUG: [Hole Filler] Preenchimento concluído.")
+    return gdf_areas_proj.to_crs(original_crs)
+
 # --- CORE PIPELINE ---
 
 def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
@@ -249,6 +343,23 @@ def run_pipeline():
     
     gdf_final_geo = gpd.GeoDataFrame(areas_limpas, crs="EPSG:4326")
 
+    # --- NOVO PASSO: Preencher Buracos no Estado do RJ ---
+    print("DEBUG: Obtendo fronteiras do estado do Rio de Janeiro via geobr...")
+    rj_state = geobr.read_state(code_state="RJ", year=2020)
+    
+    # Preparar pontos das subestações para o Voronoi
+    gdf_subs_pontos = gdf_subs_all.copy()
+    if not isinstance(gdf_subs_pontos, gpd.GeoDataFrame):
+        gdf_subs_pontos = gpd.GeoDataFrame(gdf_subs_pontos, crs=all_subs_data[0]['subs'].crs)
+    
+    # Garantir que temos pontos (centroides se forem polígonos)
+    gdf_subs_pontos = gdf_subs_pontos.to_crs("EPSG:31983")
+    gdf_subs_pontos['geometry'] = gdf_subs_pontos.geometry.centroid
+    gdf_subs_pontos = gdf_subs_pontos.to_crs("EPSG:4326")
+    gdf_subs_pontos = gdf_subs_pontos.drop_duplicates(subset=['COD_ID'])
+
+    gdf_final_geo = preencher_buracos_rj(gdf_final_geo, gdf_subs_pontos, rj_state)
+
     # 3. Adicionar Centroides (para os marcadores no mapa)
     print("DEBUG: Mapeando localizações das subestações...")
     gdf_subs_all = gpd.GeoDataFrame(gdf_subs_all, crs=all_subs_data[0]['subs'].crs)
@@ -268,8 +379,8 @@ def run_pipeline():
     )
 
     # 4. Camadas de Estatísticas (Data Providers)
-    rj_shape = geobr.read_municipality(code_muni=3304557, year=2020).to_crs("EPSG:4326")
-    bounds = rj_shape.total_bounds
+    # Usamos o shape do RJ para o bounding box das consultas
+    bounds = rj_state.to_crs("EPSG:4326").total_bounds
     
     stats_frames = []
     if DATA_PROVIDERS_CONFIG['OSM']: stats_frames.append(provider_osm(gdf_final_geo, bounds))
