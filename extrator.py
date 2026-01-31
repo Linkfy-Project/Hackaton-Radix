@@ -29,8 +29,8 @@ ARQUIVO_CONTROLE = os.path.join(PASTA_SAIDA, "controle_processamento.json")
 
 # Registro de Camadas de Dados (Data Providers)
 DATA_PROVIDERS_CONFIG = {
-    'OSM': False,
-    'CNEFE': False
+    'OSM': True,
+    'CNEFE': True
 }
 
 # Configurações de Caminhos Específicos
