@@ -9,11 +9,18 @@ import pandas as pd
 
 def investigar_conectividade():
     gdbs = {
-        'ENEL': 'Dados Brutos/BDGD ANEEL/ENEL_RJ_383_2022-09-30_V10_20240605-0611.gdb',
-        'LIGHT': 'Dados Brutos/BDGD ANEEL/LIGHT_382_2021-09-30_M10_20231218-2133.gdb'
+        'ENEL': {
+            'path': 'Dados Brutos/BDGD ANEEL/ENEL_RJ_383_2022-09-30_V10_20240605-0611.gdb',
+            'UNTRS': 'UNTRAT'
+        },
+        'LIGHT': {
+            'path': 'Dados Brutos/BDGD ANEEL/LIGHT_382_2021-09-30_M10_20231218-2133.gdb',
+            'UNTRS': 'UNTRS'
+        }
     }
     
-    for dist, path in gdbs.items():
+    for dist, cfg_dist in gdbs.items():
+        path = cfg_dist['path']
         if not os.path.exists(path):
             print(f"\nDEBUG: GDB {dist} não encontrado.")
             continue
@@ -26,9 +33,9 @@ def investigar_conectividade():
         pac_to_sub = gdf_bar.set_index('PAC')['SUB'].to_dict()
         
         # 2. Investigar UNTRS (Transformadores de Subestação)
-        # Eles conectam barras de diferentes níveis de tensão
-        print(f"DEBUG: [{dist}] Analisando transformadores de subestação (UNTRS)...")
-        gdf_untrs = gpd.read_file(path, layer='UNTRS')
+        untrs_layer = cfg_dist['UNTRS']
+        print(f"DEBUG: [{dist}] Analisando transformadores de subestação ({untrs_layer})...")
+        gdf_untrs = gpd.read_file(path, layer=untrs_layer)
         untrs_con = []
         for _, row in gdf_untrs.iterrows():
             s1 = bar_to_sub.get(row['BARR_1'])
@@ -37,13 +44,12 @@ def investigar_conectividade():
                 untrs_con.append({'SUB_1': s1, 'SUB_2': s2, 'UNTRS_ID': row['COD_ID']})
                 
         if untrs_con:
-            print(f"\n--- [{dist}] CONEXÕES VIA UNTRS (TRANSFORMADORES) ---")
+            print(f"\n--- [{dist}] CONEXÕES VIA TRANSFORMADORES ENTRE SUBS ---")
             print(pd.DataFrame(untrs_con).drop_duplicates(subset=['SUB_1', 'SUB_2']).to_string(index=False))
         else:
-            print(f"DEBUG: [{dist}] Nenhuma conexão entre subs via UNTRS.")
+            print(f"DEBUG: [{dist}] Nenhuma conexão entre subs via transformadores.")
 
         # 3. Investigar SSDAT (Segmentos de Alta Tensão)
-        # Eles conectam PACs. Se os PACs pertencerem a subestações diferentes, temos uma linha de transmissão/distribuição AT.
         print(f"DEBUG: [{dist}] Analisando segmentos de rede AT (SSDAT)...")
         gdf_ssdat = gpd.read_file(path, layer='SSDAT')
         ssdat_con = []
@@ -60,12 +66,5 @@ def investigar_conectividade():
         else:
             print(f"DEBUG: [{dist}] Nenhuma conexão direta entre subestações encontrada via PACs de SSDAT.")
 
-        # 4. Investigar CTAT (Circuitos de Alta Tensão)
-        # Vamos ver se há circuitos que mencionam subestações no nome ou se podemos ligar via SSDAT
-        print(f"DEBUG: [{dist}] Analisando circuitos AT (CTAT)...")
-        gdf_ctat = gpd.read_file(path, layer='CTAT')
-        # CTAT geralmente não tem coluna SUB, mas o nome pode dar dicas
-        # Ex: LI-TSU-GRA-2 (TSU e GRA podem ser códigos de subestações)
-        
 if __name__ == "__main__":
     investigar_conectividade()
