@@ -9,8 +9,17 @@ CNEFE_RJ.csv
 /tiles_caches
 *.rar
 *.zip
-*.png
 /Dados Brutos
 Painel Solar/world/yolov5_X.pt
 New folder/audio_extraido.mp3
 New folder/monitoria.mkv
+/brasilia
+/parque
+/teresina
+/tiles dataset
+Organizar/mapa_alta_resolucao.png
+Organizar/mosaico_circular.png
+Organizar/mosaico_circular_preciso.png
+Organizar/mosaico_circular_precisoo.png
+Organizar/mosaico_voronoi.png
+Organizar/estrutura_gdb.png
