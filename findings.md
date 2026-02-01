@@ -287,3 +287,58 @@ Concluí as otimizações de performance e as melhorias visuais solicitadas.
 
 O sistema agora une **precisão técnica**, **performance** e uma **interface visual intuitiva** para entender a malha energética do Rio de Janeiro.
 
+
+Excelente! Os resultados que você obteve para a **Light** confirmam exatamente a tese: a subestação **1240** possui uma carga massiva de mais de **60 mil residências** e **131 indústrias** de médio porte.
+
+Com base na sua execução e na minha análise dos arquivos, aqui está o veredito final sobre os dados de consumo no BDGD:
+
+### 1. Onde os dados estão (Resumo Final)
+*   **Vínculo Elétrico:** A coluna `SUB` em todas as tabelas `UC*_tab` é a "chave de ouro". Ela liga cada medidor de energia da rua diretamente à subestação que o alimenta.
+*   **Classes de Consumo:** A coluna `TIP_CC` classifica o uso. Como vimos nos seus resultados:
+    *   `RES-Tipo1`: Residencial.
+    *   `IND-Tipo1`: Industrial.
+    *   `COM-Tipo1`: Comercial (provavelmente apareceria se filtrássemos mais).
+
+### 2. O que mais você pode extrair disso?
+Como esses dados são individuais por cliente (UC), você pode subir o nível da análise:
+*   **Consumo de Energia:** Somar as colunas `ENE_01` a `ENE_12` para saber o consumo mensal total (em kWh) que aquela subestação entrega para cada classe.
+*   **Carga Instalada:** Somar a coluna `CAR_INST` para saber a demanda potencial máxima de cada setor.
+*   **Geolocalização:** Como as UCs têm coordenadas (ou estão ligadas a transformadores com coordenadas), você pode gerar um "mapa de calor" de onde estão as indústrias dentro da área de atendimento daquela subestação.
+
+### 3. Diferença entre as Distribuidoras
+Notei uma pequena variação na nomenclatura que seu script tratou bem:
+*   **ENEL:** Usa hífens e zeros (ex: `RES-Tipo01`).
+*   **LIGHT:** Usa nomenclatura mais direta (ex: `RES-Tipo1`).
+
+**Conclusão:** Sim, os dados existem, são extremamente detalhados e permitem que você mapeie o "DNA de consumo" de cada subestação do Rio de Janeiro. Você tem em mãos uma ferramenta poderosa para análise de impacto econômico e planejamento de rede.
+
+Se precisar de um script que faça esse levantamento para **todas** as subestações de uma vez e gere um CSV consolidado, estou à disposição!
+
+Entendi a sua dúvida! A variação mensal é justamente o que o BDGD tenta capturar. Deixe-me explicar como esses dados são estruturados:
+
+O BDGD não fornece apenas um número de "consumo médio". Ele fornece **12 colunas separadas**, uma para cada mês do ano anterior à data de fechamento do banco.
+
+### Como funciona a estrutura:
+Nas tabelas de consumidores (`UCBT_tab`, `UCMT_tab`, etc.), você encontrará as colunas:
+*   **`ENE_01`**: Consumo de energia no mês 1 (ex: Janeiro)
+*   **`ENE_02`**: Consumo de energia no mês 2 (ex: Fevereiro)
+*   ... até ...
+*   **`ENE_12`**: Consumo de energia no mês 12 (ex: Dezembro)
+
+### Por que isso é útil?
+Isso permite que você veja a **sazonalidade** da subestação. Por exemplo:
+1.  **Verão:** Você pode somar a coluna `ENE_01` (Janeiro) de todos os 60.000 clientes da subestação 1240. Você verá que o consumo residencial explode por causa do ar-condicionado.
+2.  **Inverno:** Você soma a coluna `ENE_07` (Julho) e verá um perfil de consumo totalmente diferente.
+
+### Respondendo à sua pergunta:
+O consumo varia de mês para mês, e o BDGD registra essa variação. Se você quiser saber o consumo **mensal total** de uma subestação para a classe industrial, você faria o seguinte:
+
+1.  Filtra todos os clientes onde `SUB = '1240'` e `TIP_CC = 'IND-Tipo1'`.
+2.  Soma a coluna `ENE_01` de todos eles -> **Resultado:** Total de kWh industriais entregues por essa subestação em Janeiro.
+3.  Soma a coluna `ENE_02` de todos eles -> **Resultado:** Total de kWh industriais entregues em Fevereiro.
+
+**Em resumo:** O banco de dados é como uma "planilha histórica". Ele guarda o que aconteceu em cada um dos 12 meses para cada cliente. Assim, você consegue obter o consumo de qualquer mês específico ou a média anual, se preferir.
+
+Ficou mais claro como o dado é organizado? Se quiser, posso rodar um comando para somar o consumo de Janeiro (`ENE_01`) daquela subestação 1240 para você ver o número total.
+
+

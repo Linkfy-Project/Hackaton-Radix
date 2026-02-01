@@ -1,6 +1,7 @@
 """
 Este script cria uma interface web usando Streamlit e Folium para exibir um mapa interativo.
 Ele utiliza um único arquivo GeoJSON unificado contendo tanto a geografia quanto as estatísticas.
+Otimizado com SVG Symbols e Canvas para performance extrema com centenas de ícones customizados.
 """
 
 import streamlit as st
@@ -9,8 +10,11 @@ from streamlit_folium import st_folium
 import geopandas as gpd
 import geobr
 from folium.plugins import Fullscreen, MousePosition, MeasureControl, AntPath
+from folium.features import DivIcon
 import os
 import random
+import base64
+import re
 
 # --- CONFIGURAÇÕES ---
 ARQUIVO_UNIFICADO = os.path.join("Dados Processados", "dados_finais_rj.geojson")
@@ -117,13 +121,31 @@ def gerar_html_popup(row):
         stats_html += "Sem dados do CNEFE para esta área.<br>"
         
     return stats_html
+def get_image_base64(icon_name):
+    """
+    Converte uma imagem (PNG/SVG) para string Base64.
+    """
+    path = os.path.join("assets", "icons", icon_name)
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("utf-8")
+            ext = icon_name.split('.')[-1]
+            return f"data:image/{ext};base64,{data}"
+    return None
 
 @st.cache_resource
 def create_map_object(_rj_shape, _gdf_unificado):
     """
-    Cria o objeto de mapa Folium.
+    Cria o objeto de mapa Folium otimizado com ícones PNG (mais leves para GPUs antigas).
     """
-    m = folium.Map(location=[-22.9068, -43.1729], zoom_start=11, control_scale=True)
+    print("DEBUG: Iniciando criação do objeto de mapa com ícones PNG...")
+    
+    m = folium.Map(
+        location=[-22.9068, -43.1729],
+        zoom_start=11,
+        control_scale=True,
+        prefer_canvas=True # Mantém Canvas para polígonos
+    )
     
     # Tiles
     folium.TileLayer('openstreetmap', name='OpenStreetMap').add_to(m)
@@ -135,96 +157,105 @@ def create_map_object(_rj_shape, _gdf_unificado):
     
     # Contorno RJ
     folium.GeoJson(
-        _rj_shape, name="Contorno Rio de Janeiro",
-        style_function=lambda x: {'fillColor': 'none', 'color': 'yellow', 'weight': 3}
+        _rj_shape.simplify(0.001), name="Contorno Rio de Janeiro",
+        style_function=lambda x: {'fillColor': 'none', 'color': 'yellow', 'weight': 2}
     ).add_to(m)
     
     if _gdf_unificado is not None:
-        areas_group = folium.FeatureGroup(name="Áreas de Atendimento Reais").add_to(m)
-        sub_group = folium.FeatureGroup(name="Subestações").add_to(m)
-        hierarchy_group = folium.FeatureGroup(name="Hierarquia de Alimentação", show=False).add_to(m)
-        
-        # Mapear coordenadas das subestações para desenhar as setas
-        coords_subs = {str(row['COD_ID']): (row['lat_sub'], row['lon_sub']) for _, row in _gdf_unificado.iterrows()}
-
-        # Mapeamento de Ícones por Classificação
-        icon_map = {
-            "1. Distribuição Plena": "assets/icons/plena.svg",
-            "2. Distribuição Satélite": "assets/icons/satelite.svg",
-            "3. Transformadora Pura": "assets/icons/pura.svg",
-            "4. Transporte/Manobra": "assets/icons/transporte.svg"
+        # Carregar ícones PNG em Base64
+        # Carregar ícones PNG em Base64 e definir proporções (width/height)
+        # O raio é 73x128, os outros assumimos 1:1 (128x128)
+        icons_config = {
+            "raio": {"url": get_image_base64("raio.png"), "ratio": 73/128},
+            "satelite": {"url": get_image_base64("satelite.png"), "ratio": 1.0},
+            "transformador": {"url": get_image_base64("transformador.png"), "ratio": 1.0},
+            "torre": {"url": get_image_base64("torre.png"), "ratio": 1.0}
         }
 
-        # Lista de cores vibrantes para diferenciar as áreas
+        # Mapeamento de Categorias
+        categories = {
+            "1. Distribuição Plena": ("⚡ SE: Distribuição Plena", icons_config["raio"]),
+            "2. Distribuição Satélite": ("📡 SE: Distribuição Satélite", icons_config["satelite"]),
+            "3. Transformadora Pura": ("🔄 SE: Transformadora Pura", icons_config["transformador"]),
+            "4. Transporte/Manobra": ("🏗️ SE: Transporte/Manobra", icons_config["torre"])
+        }
+
+        hierarchy_group = folium.FeatureGroup(name="🔗 Hierarquia de Alimentação", show=False).add_to(m)
+        coords_subs = {str(row['COD_ID']): (row['lat_sub'], row['lon_sub']) for _, row in _gdf_unificado.iterrows()}
+
         cores_vibrantes = [
-            'red', 'blue', 'green', 'purple', 'orange', 'darkred', 
-            'lightred', 'beige', 'darkblue', 'darkgreen', 'cadetblue', 
-            'darkpurple', 'pink', 'lightblue', 'lightgreen', 
-            'gray', 'black'
+            '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
+            '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff',
+            '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1'
         ]
-        
-        for i, row in _gdf_unificado.iterrows():
-            dist = row.get('DISTRIBUIDORA', 'LIGHT')
-            # Escolhe uma cor baseada no índice para ser consistente
-            area_color = cores_vibrantes[i % len(cores_vibrantes)]
-            marker_color = CORES_DISTRIBUIDORA.get(dist, 'gray')
+
+        # --- RENDERIZAÇÃO ---
+        for base_classif, (group_name, icon_config) in categories.items():
+            group = folium.FeatureGroup(name=group_name).add_to(m)
             
-            # Popup unificado
-            popup_content = gerar_html_popup(row)
+            mask = _gdf_unificado['CLASSIFICACAO'].str.contains(base_classif, na=False)
+            gdf_cat = _gdf_unificado[mask].copy()
             
-            # Desenha Polígono da Área Real
+            if gdf_cat.empty: continue
+
+            # Polígonos em massa (Simplificados)
+            gdf_cat['geometry'] = gdf_cat['geometry'].simplify(0.0001)
+            gdf_cat['color'] = [cores_vibrantes[i % len(cores_vibrantes)] for i in range(len(gdf_cat))]
+            
             folium.GeoJson(
-                row.geometry,
-                style_function=lambda x, c=area_color: {
-                    'fillColor': c, 'color': 'white', 'weight': 1, 'fillOpacity': 0.4
+                gdf_cat,
+                style_function=lambda x: {
+                    'fillColor': x['properties']['color'], 'color': 'white', 'weight': 1, 'fillOpacity': 0.3
                 },
-                tooltip=f"Área: {row['NOM']} ({dist})",
-                popup=folium.Popup(popup_content, max_width=300)
-            ).add_to(areas_group)
-            
-            # Desenha Marcador da Subestação
-            pot = row['POTENCIA_CALCULADA']
-            radius = min(15, 4 + (pot / 50.0))
-            
-            # Desenha Marcador da Subestação (Ícone Customizado ou Círculo)
-            classif = row.get('CLASSIFICACAO', '')
-            icon_path = icon_map.get(classif)
-            
-            if icon_path and os.path.exists(icon_path):
-                folium.Marker(
-                    location=[row['lat_sub'], row['lon_sub']],
-                    icon=folium.CustomIcon(icon_path, icon_size=(32, 32)),
-                    popup=folium.Popup(popup_content, max_width=300),
-                    tooltip=f"SE: {row['NOM']} ({classif})"
-                ).add_to(sub_group)
-            else:
-                # Fallback para CircleMarker se o ícone não existir
-                pot = row['POTENCIA_CALCULADA']
-                radius = min(15, 4 + (pot / 50.0))
-                folium.CircleMarker(
-                    location=[row['lat_sub'], row['lon_sub']],
-                    radius=radius, color='white', weight=1, fill=True, fill_color=marker_color, fill_opacity=1,
-                    popup=folium.Popup(popup_content, max_width=300),
-                    tooltip=f"SE: {row['NOM']} ({classif})"
-                ).add_to(sub_group)
-            
-            # Desenha Fluxo de Alimentação Animado (AntPath)
+                tooltip=folium.GeoJsonTooltip(fields=['NOM'], aliases=['Área:']),
+                popup=folium.GeoJsonPopup(fields=['NOM', 'DISTRIBUIDORA', 'POTENCIA_CALCULADA'], aliases=['Nome:', 'Distribuidora:', 'Potência:'])
+            ).add_to(group)
+
+            # Marcadores PNG (Muito mais leves para renderizar)
+            icon_url = icon_config["url"]
+            ratio = icon_config["ratio"]
+
+            for _, row in gdf_cat.iterrows():
+                pot = row.get('POTENCIA_CALCULADA', 0)
+                base_size = 25 + min(45, pot / 10.0)
+                
+                if icon_url:
+                    # Calcular largura e altura baseada na proporção real
+                    if ratio <= 1: # Mais alto que largo (ex: raio)
+                        height = base_size
+                        width = base_size * ratio
+                    else: # Mais largo que alto
+                        width = base_size
+                        height = base_size / ratio
+
+                    folium.Marker(
+                        location=[row['lat_sub'], row['lon_sub']],
+                        icon=folium.CustomIcon(icon_url, icon_size=(int(width), int(height))),
+                        popup=folium.Popup(gerar_html_popup(row), max_width=300),
+                        tooltip=f"SE: {row['NOM']}"
+                    ).add_to(group)
+                else:
+                    folium.CircleMarker(
+                        location=[row['lat_sub'], row['lon_sub']],
+                        radius=min(15, 4 + (pot / 50.0)),
+                        color='white', weight=1, fill=True, fill_color='gray', fill_opacity=1,
+                        popup=folium.Popup(gerar_html_popup(row), max_width=300),
+                        tooltip=f"SE: {row['NOM']}"
+                    ).add_to(group)
+
+        # 3. Fluxo de Alimentação (AntPath)
+        # 3. Fluxo de Alimentação (AntPath)
+        for _, row in _gdf_unificado.iterrows():
             mae_id = str(row.get('SUB_MAE', ''))
             if mae_id and mae_id in coords_subs and mae_id != str(row['COD_ID']):
                 mae_coords = coords_subs[mae_id]
                 filha_coords = (row['lat_sub'], row['lon_sub'])
-                
                 AntPath(
                     locations=[mae_coords, filha_coords],
-                    color='white', # Cor de fundo (trilha)
-                    pulse_color='yellow', # Amarelo original (movimento)
-                    weight=3,
-                    opacity=0.9,
-                    delay=800,
-                    dash_array=[10, 20],
+                    color='white', pulse_color='yellow', weight=3, opacity=0.9,
+                    delay=800, dash_array=[10, 20],
                     tooltip=f"Fluxo: {mae_id} -> {row['NOM']}"
                 ).add_to(hierarchy_group)
-            
 
     # Controles
     Fullscreen().add_to(m)
