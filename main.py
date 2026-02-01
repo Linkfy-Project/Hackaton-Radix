@@ -1,7 +1,7 @@
 """
 Este script cria uma interface web usando Streamlit e Folium para exibir um mapa interativo.
 Ele utiliza um único arquivo GeoJSON unificado contendo tanto a geografia quanto as estatísticas.
-Otimizado com SVG Symbols e Canvas para performance extrema com centenas de ícones customizados.
+Otimizado com PNGs rasterizados e renderização em massa para performance profissional.
 """
 
 import streamlit as st
@@ -65,16 +65,18 @@ def gerar_html_popup(row):
     dist = row.get('DISTRIBUIDORA', 'N/A')
     classificacao = row.get('CLASSIFICACAO', 'Não Classificada')
     mae = row.get('SUB_MAE', 'N/A')
-    
-    stats_html = f"<b>Área da SE: {row['NOM'] or cod_id}</b><br>"
-    stats_html += f"Distribuidora: {dist}<br>"
-    stats_html += f"<b>Classificação: {classificacao}</b><br>"
+    stats_html = f'<div style="font-family: sans-serif; min-width: 250px; max-width: 300px;">'
+    stats_html += f'<h4 style="margin: 0 0 10px 0; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px;">{row["NOM"] or cod_id}</h4>'
+    stats_html += f"<b>Distribuidora:</b> {dist}<br>"
+    stats_html += f"<b>Classificação:</b> {classificacao}<br>"
     if mae and mae != '0' and mae != 'None':
-        stats_html += f"Alimentada por (ID): {mae}<br>"
-    stats_html += f"Potência: {row['POTENCIA_CALCULADA']:.2f} MVA<br>"
+        stats_html += f"<b>Alimentada por (ID):</b> {mae}<br>"
+    stats_html += f"<b>Potência:</b> {row['POTENCIA_CALCULADA']:.2f} MVA<br>"
     if pot_nom and pot_nom > 0:
-        stats_html += f"Potência Nominal: {pot_nom:.2f} MVA<br>"
-    stats_html += "<br><b>Estatísticas CNEFE:</b><br>"
+        stats_html += f"<b>Potência Nominal:</b> {pot_nom:.2f} MVA<br>"
+    
+    stats_html += "<div style='margin-top: 10px; padding: 8px; background: #f9f9f9; border-radius: 5px;'>"
+    stats_html += "<b>Estatísticas CNEFE:</b><br>"
     
     total_consumidores = 0
     residenciais = 0
@@ -103,24 +105,28 @@ def gerar_html_popup(row):
             
             # Listagem detalhada
             if esp_code != 6:
-                stats_html += f"- {esp_nome}: {count}<br>"
+                stats_html += f"• {esp_nome}: {count}<br>"
             else:
                 outros_calc = max(0, count_outras - (count_osm_shop + count_osm_ind))
-                stats_html += f"- {esp_nome}: {count_outras}<br>"
-                stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;indústria: {count_osm_ind}<br>"
-                stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;comércio: {count_osm_shop}<br>"
-                stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;outros: {outros_calc}<br>"
+                stats_html += f"• {esp_nome}: {count_outras}<br>"
+                stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;<i>indústria: {count_osm_ind}</i><br>"
+                stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;<i>comércio: {count_osm_shop}</i><br>"
+                stats_html += f"&nbsp;&nbsp;&nbsp;&nbsp;<i>outros: {outros_calc}</i><br>"
     
     if total_consumidores > 0:
+        stats_html += f"<hr style='margin: 8px 0; border: 0; border-top: 1px solid #ddd;'>"
         stats_html += f"<b>Total de Endereços: {total_consumidores}</b>"
         perc_res = (residenciais / total_consumidores) * 100
         perc_com = (comerciais / total_consumidores) * 100
-        stats_html += f"<div style='color: green;'><br><b>- Residencial ({perc_res:.1f}%)</b>: {residenciais}</div>"
-        stats_html += f"<div style='color: red;'><b>- Não Residencial ({perc_com:.1f}%)</b>: {comerciais}</div>"
+        stats_html += f"<div style='color: #2e7d32; margin-top: 5px;'><b>Residencial ({perc_res:.1f}%)</b>: {residenciais}</div>"
+        stats_html += f"<div style='color: #c62828;'><b>Não Residencial ({perc_com:.1f}%)</b>: {comerciais}</div>"
     else:
-        stats_html += "Sem dados do CNEFE para esta área.<br>"
-        
+        stats_html += "<br><i>Sem dados do CNEFE para esta área.</i>"
+    
+    stats_html += "</div></div>"
     return stats_html
+    return stats_html
+
 def get_image_base64(icon_name):
     """
     Converte uma imagem (PNG/SVG) para string Base64.
@@ -136,15 +142,15 @@ def get_image_base64(icon_name):
 @st.cache_resource
 def create_map_object(_rj_shape, _gdf_unificado):
     """
-    Cria o objeto de mapa Folium otimizado com ícones PNG (mais leves para GPUs antigas).
+    Cria o objeto de mapa Folium otimizado com ícones PNG e popups completos.
     """
-    print("DEBUG: Iniciando criação do objeto de mapa com ícones PNG...")
+    print("DEBUG: Iniciando criação do objeto de mapa otimizado...")
     
     m = folium.Map(
-        location=[-22.9068, -43.1729],
-        zoom_start=11,
+        location=[-22.9068, -43.1729], 
+        zoom_start=11, 
         control_scale=True,
-        prefer_canvas=True # Mantém Canvas para polígonos
+        prefer_canvas=True
     )
     
     # Tiles
@@ -162,9 +168,7 @@ def create_map_object(_rj_shape, _gdf_unificado):
     ).add_to(m)
     
     if _gdf_unificado is not None:
-        # Carregar ícones PNG em Base64
-        # Carregar ícones PNG em Base64 e definir proporções (width/height)
-        # O raio é 73x128, os outros assumimos 1:1 (128x128)
+        # Carregar ícones PNG em Base64 e definir proporções reais
         icons_config = {
             "raio": {"url": get_image_base64("raio.png"), "ratio": 73/128},
             "satelite": {"url": get_image_base64("satelite.png"), "ratio": 1.0},
@@ -198,6 +202,9 @@ def create_map_object(_rj_shape, _gdf_unificado):
             
             if gdf_cat.empty: continue
 
+            # Gerar HTML do popup para cada linha e salvar no GeoDataFrame
+            gdf_cat['popup_html'] = gdf_cat.apply(gerar_html_popup, axis=1)
+
             # Polígonos em massa (Simplificados)
             gdf_cat['geometry'] = gdf_cat['geometry'].simplify(0.0001)
             gdf_cat['color'] = [cores_vibrantes[i % len(cores_vibrantes)] for i in range(len(gdf_cat))]
@@ -208,10 +215,10 @@ def create_map_object(_rj_shape, _gdf_unificado):
                     'fillColor': x['properties']['color'], 'color': 'white', 'weight': 1, 'fillOpacity': 0.3
                 },
                 tooltip=folium.GeoJsonTooltip(fields=['NOM'], aliases=['Área:']),
-                popup=folium.GeoJsonPopup(fields=['NOM', 'DISTRIBUIDORA', 'POTENCIA_CALCULADA'], aliases=['Nome:', 'Distribuidora:', 'Potência:'])
+                popup=folium.GeoJsonPopup(fields=['popup_html'], labels=False)
             ).add_to(group)
 
-            # Marcadores PNG (Muito mais leves para renderizar)
+            # Marcadores PNG
             icon_url = icon_config["url"]
             ratio = icon_config["ratio"]
 
@@ -220,8 +227,7 @@ def create_map_object(_rj_shape, _gdf_unificado):
                 base_size = 25 + min(45, pot / 10.0)
                 
                 if icon_url:
-                    # Calcular largura e altura baseada na proporção real
-                    if ratio <= 1: # Mais alto que largo (ex: raio)
+                    if ratio <= 1: # Mais alto que largo
                         height = base_size
                         width = base_size * ratio
                     else: # Mais largo que alto
@@ -231,7 +237,7 @@ def create_map_object(_rj_shape, _gdf_unificado):
                     folium.Marker(
                         location=[row['lat_sub'], row['lon_sub']],
                         icon=folium.CustomIcon(icon_url, icon_size=(int(width), int(height))),
-                        popup=folium.Popup(gerar_html_popup(row), max_width=300),
+                        popup=folium.Popup(row['popup_html'], max_width=300),
                         tooltip=f"SE: {row['NOM']}"
                     ).add_to(group)
                 else:
@@ -239,11 +245,10 @@ def create_map_object(_rj_shape, _gdf_unificado):
                         location=[row['lat_sub'], row['lon_sub']],
                         radius=min(15, 4 + (pot / 50.0)),
                         color='white', weight=1, fill=True, fill_color='gray', fill_opacity=1,
-                        popup=folium.Popup(gerar_html_popup(row), max_width=300),
+                        popup=folium.Popup(row['popup_html'], max_width=300),
                         tooltip=f"SE: {row['NOM']}"
                     ).add_to(group)
 
-        # 3. Fluxo de Alimentação (AntPath)
         # 3. Fluxo de Alimentação (AntPath)
         for _, row in _gdf_unificado.iterrows():
             mae_id = str(row.get('SUB_MAE', ''))
