@@ -552,14 +552,6 @@ def run_pipeline():
 
     gdf_final_geo = gdf_final_geo.fillna(0)
     gdf_final_geo.columns = [str(c) for c in gdf_final_geo.columns]
-
-    # --- OTIMIZAÇÃO: Simplificação Ultra-Fina (1 metro) ---
-    print("DEBUG: Aplicando simplificação de geometria (1m de tolerância)...")
-    original_crs = gdf_final_geo.crs
-    # Simplifica em metros para precisão técnica
-    gdf_final_geo = gdf_final_geo.to_crs("EPSG:31983")
-    gdf_final_geo['geometry'] = gdf_final_geo.simplify(tolerance=1.0, preserve_topology=True)
-    gdf_final_geo = gdf_final_geo.to_crs(original_crs)
     
     print(f"DEBUG: Salvando arquivo mestre unificado: {ARQUIVO_SAIDA_FINAL}")
     if not os.path.exists(PASTA_SAIDA): os.makedirs(PASTA_SAIDA)

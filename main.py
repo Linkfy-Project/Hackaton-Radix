@@ -8,7 +8,7 @@ import folium
 from streamlit_folium import st_folium
 import geopandas as gpd
 import geobr
-from folium.plugins import Fullscreen, MousePosition, MeasureControl
+from folium.plugins import Fullscreen, MousePosition, MeasureControl, AntPath
 import os
 import random
 
@@ -147,6 +147,14 @@ def create_map_object(_rj_shape, _gdf_unificado):
         # Mapear coordenadas das subestações para desenhar as setas
         coords_subs = {str(row['COD_ID']): (row['lat_sub'], row['lon_sub']) for _, row in _gdf_unificado.iterrows()}
 
+        # Mapeamento de Ícones por Classificação
+        icon_map = {
+            "1. Distribuição Plena": "assets/icons/plena.svg",
+            "2. Distribuição Satélite": "assets/icons/satelite.svg",
+            "3. Transformadora Pura": "assets/icons/pura.svg",
+            "4. Transporte/Manobra": "assets/icons/transporte.svg"
+        }
+
         # Lista de cores vibrantes para diferenciar as áreas
         cores_vibrantes = [
             'red', 'blue', 'green', 'purple', 'orange', 'darkred', 
@@ -178,38 +186,46 @@ def create_map_object(_rj_shape, _gdf_unificado):
             pot = row['POTENCIA_CALCULADA']
             radius = min(15, 4 + (pot / 50.0))
             
-            folium.CircleMarker(
-                location=[row['lat_sub'], row['lon_sub']],
-                radius=radius, color='white', weight=1, fill=True, fill_color=marker_color, fill_opacity=1,
-                popup=folium.Popup(popup_content, max_width=300),
-                tooltip=f"SE: {row['NOM']} ({dist})"
-            ).add_to(sub_group)
+            # Desenha Marcador da Subestação (Ícone Customizado ou Círculo)
+            classif = row.get('CLASSIFICACAO', '')
+            icon_path = icon_map.get(classif)
             
-            # Desenha Seta de Alimentação (Hierarquia)
+            if icon_path and os.path.exists(icon_path):
+                folium.Marker(
+                    location=[row['lat_sub'], row['lon_sub']],
+                    icon=folium.CustomIcon(icon_path, icon_size=(32, 32)),
+                    popup=folium.Popup(popup_content, max_width=300),
+                    tooltip=f"SE: {row['NOM']} ({classif})"
+                ).add_to(sub_group)
+            else:
+                # Fallback para CircleMarker se o ícone não existir
+                pot = row['POTENCIA_CALCULADA']
+                radius = min(15, 4 + (pot / 50.0))
+                folium.CircleMarker(
+                    location=[row['lat_sub'], row['lon_sub']],
+                    radius=radius, color='white', weight=1, fill=True, fill_color=marker_color, fill_opacity=1,
+                    popup=folium.Popup(popup_content, max_width=300),
+                    tooltip=f"SE: {row['NOM']} ({classif})"
+                ).add_to(sub_group)
+            
+            # Desenha Fluxo de Alimentação Animado (AntPath)
             mae_id = str(row.get('SUB_MAE', ''))
             if mae_id and mae_id in coords_subs and mae_id != str(row['COD_ID']):
                 mae_coords = coords_subs[mae_id]
                 filha_coords = (row['lat_sub'], row['lon_sub'])
                 
-                # Linha com seta
-                folium.PolyLine(
+                AntPath(
                     locations=[mae_coords, filha_coords],
-                    color='yellow',
-                    weight=2,
-                    opacity=0.8,
-                    dash_array='5, 10',
+                    color='white', # Cor de fundo (trilha)
+                    pulse_color='yellow', # Amarelo original (movimento)
+                    weight=3,
+                    opacity=0.9,
+                    delay=800,
+                    dash_array=[10, 20],
                     tooltip=f"Fluxo: {mae_id} -> {row['NOM']}"
                 ).add_to(hierarchy_group)
-                
-                # Adicionar um pequeno círculo na ponta para indicar direção
-                folium.CircleMarker(
-                    location=filha_coords,
-                    radius=3,
-                    color='yellow',
-                    fill=True,
-                    fill_color='yellow'
-                ).add_to(hierarchy_group)
             
+
     # Controles
     Fullscreen().add_to(m)
     MousePosition().add_to(m)
