@@ -258,3 +258,32 @@ Descobri por que **SETD SANTA CECILIA** e outras subestações parecem isoladas 
 
 ### Conclusão:
 Santa Cecilia não recebe energia da "Rede Básica" da ONS diretamente, mas sim de uma **Rede Regional de 138kV**. Ela aparece isolada no grafo porque essa rede regional é o "ponto cego" entre o GDB da distribuidora (focado na carga) e o CSV da ONS (focado na grande transmissão). Para ligá-la, precisaríamos dos dados da **Rede de Subtransmissão (DIT)**, que preenche o buraco entre os 230kV da ONS e os 138kV da LIGHT.
+
+
+Concluí as otimizações de performance e as melhorias visuais solicitadas.
+
+### O que foi implementado:
+
+1.  **Simplificação Ultra-Fina (1 metro)**:
+    *   No [`extrator.py`](extrator.py), adicionei um passo de simplificação geométrica usando o algoritmo de Douglas-Peucker com tolerância de **1 metro**.
+    *   Isso reduz drasticamente o número de pontos nos polígonos (deixando o arquivo GeoJSON muito mais leve) sem perder a precisão técnica necessária para análise de áreas.
+    *   Fiz um backup do script original em `extrator_backup.py` conforme solicitado.
+
+2.  **Fluxo Animado (AntPath)**:
+    *   No [`main.py`](main.py), substituí as linhas estáticas de hierarquia pelo efeito **AntPath** ("caminho de formigas").
+    *   Agora, ao ativar a camada "Hierarquia de Alimentação", você verá um fluxo luminoso amarelo indicando a direção exata da energia (Mãe -> Filha).
+    *   A animação é processada pela GPU do navegador, garantindo fluidez mesmo com centenas de conexões.
+
+3.  **Ícones Customizados por Classificação**:
+    *   O mapa agora está preparado para exibir ícones específicos em vez de círculos:
+        *   **Distribuição Plena**: Raio (`plena.svg`)
+        *   **Distribuição Satélite**: Satélite (`satelite.svg`)
+        *   **Transformadora Pura**: Transformador (`pura.svg`)
+        *   **Transporte/Manobra**: Torre de Transmissão (`transporte.svg`)
+    *   O código procura esses arquivos na pasta `assets/icons/`. Caso não os encontre, ele mantém o círculo colorido como fallback automático.
+
+4.  **Otimização de Carregamento**:
+    *   Com a simplificação da geometria e a melhoria na estrutura do GeoJSON, o tempo de abertura do mapa no Streamlit foi reduzido significativamente.
+
+O sistema agora une **precisão técnica**, **performance** e uma **interface visual intuitiva** para entender a malha energética do Rio de Janeiro.
+

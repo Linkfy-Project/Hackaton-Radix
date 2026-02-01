@@ -243,12 +243,31 @@ def preencher_buracos_rj(gdf_areas: gpd.GeoDataFrame, gdf_subs_pontos: gpd.GeoDa
 def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFrame:
     """
     Aplica a lógica de classificação (Plena, Satélite, etc.) e rastreia quem alimenta quem.
+    Utiliza busca recursiva na topologia de Alta Tensão (SSDAT) e integra dados da ONS.
     """
     print("DEBUG: [Classificação] Iniciando classificação e rastreamento hierárquico...")
     
+    # 0. Carregar Dados ONS para mapeamento de fronteira
+    path_ons_sub = "Dados Brutos/ONS/SUBESTACAO.csv"
+    barra_para_ons = {}
+    if os.path.exists(path_ons_sub):
+        print("DEBUG: [Classificação] Carregando base de subestações ONS...")
+        df_ons = pd.read_csv(path_ons_sub, sep=';', encoding='latin1')
+        for _, row in df_ons.iterrows():
+            if not pd.isna(row['num_barra']):
+                barra_para_ons[str(int(row['num_barra']))] = row['nom_subestacao']
+
     todas_classificacoes = []
-    todas_conexoes = []
+    classificacao_por_id = {}
+    mae_por_id = {}
     
+    # Estruturas para o Grafo de Segmentos (Fios)
+    pac_to_segs = {} # {pac_id: set(segment_indices)}
+    seg_to_subs = {} # {segment_index: set(sub_ids)}
+    sub_to_segs = {} # {sub_id: set(segment_indices)}
+    seg_data = []    # Lista de todos os segmentos SSDAT para referência
+    
+    # Passo 1: Classificação Inicial e Mapeamento Geográfico/Topológico
     for data in all_subs_data:
         subs = data['subs']
         untrd = data['tr_geo']
@@ -258,43 +277,53 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
         ssdat = data['ssdat']
         dist = subs.iloc[0]['DISTRIBUIDORA']
         
-        # Mapeamentos para busca rápida
-        circuito_para_mae = {}
-        if ctmt is not None:
-            circuito_para_mae = ctmt.set_index('COD_ID')['SUB'].to_dict()
-            
-        subs_com_untrs = set()
-        if untrs is not None:
-            subs_com_untrs = set(untrs['SUB'].unique())
-            
-        pac_to_sub = {}
-        if bar is not None:
-            pac_to_sub = bar.set_index('PAC')['SUB'].to_dict()
-            
-        # Otimização: Agrupar transformadores por subestação uma única vez
+        # Mapeamentos base do GDB
+        circuito_para_mae = ctmt.set_index('COD_ID')['SUB'].to_dict() if ctmt is not None else {}
+        subs_com_untrs = set(untrs['SUB'].unique()) if untrs is not None else set()
+        pac_to_sub = bar.set_index('PAC')['SUB'].to_dict() if bar is not None else {}
+        
+        # Agrupar transformadores para classificação
         untrd_por_sub = {}
         if untrd is not None:
-            print(f"DEBUG: [Classificação] Agrupando transformadores para {dist}...")
             for sub_id, grupo in untrd.groupby('SUB'):
                 untrd_por_sub[str(sub_id).strip()] = grupo
 
-        # Otimização: Mapear conexões de Alta Tensão uma única vez
-        conexoes_at = {}
+        # Construir Grafo de Segmentos (Fios)
         if ssdat is not None:
-            print(f"DEBUG: [Classificação] Mapeando topologia AT para {dist}...")
-            for _, line in ssdat.iterrows():
-                s1 = str(pac_to_sub.get(line['PAC_1'])).strip()
-                s2 = str(pac_to_sub.get(line['PAC_2'])).strip()
-                if s1 != "None" and s2 != "None" and s1 != s2:
-                    if s1 not in conexoes_at: conexoes_at[s1] = s2
-                    if s2 not in conexoes_at: conexoes_at[s2] = s1
+            # Join Geográfico para saber quais subestações cada fio toca
+            target_crs = "EPSG:31983"
+            subs_proj = subs.to_crs(target_crs)
+            ssdat_proj = ssdat.to_crs(target_crs)
+            subs_buffer = subs_proj.copy()
+            subs_buffer['geometry'] = subs_proj.geometry.buffer(50) # 50m de tolerância
+            
+            spatial_join = gpd.sjoin(ssdat_proj, subs_buffer[['COD_ID', 'geometry']], how='inner', predicate='intersects')
+            
+            for idx, row in ssdat.iterrows():
+                global_idx = len(seg_data)
+                seg_data.append(row)
+                
+                p1, p2 = str(row['PAC_1']), str(row['PAC_2'])
+                for p in [p1, p2]:
+                    if p not in pac_to_segs: pac_to_segs[p] = set()
+                    pac_to_segs[p].add(global_idx)
+                
+                # Subestações tocadas por este segmento
+                if idx in spatial_join.index:
+                    # O sjoin pode renomear a coluna se houver colisão
+                    col_id = 'COD_ID' if 'COD_ID' in spatial_join.columns else 'COD_ID_right'
+                    sids = spatial_join.loc[[idx], col_id].unique()
+                    for sid in sids:
+                        sid_str = str(sid).strip()
+                        if global_idx not in seg_to_subs: seg_to_subs[global_idx] = set()
+                        seg_to_subs[global_idx].add(sid_str)
+                        if sid_str not in sub_to_segs: sub_to_segs[sid_str] = set()
+                        sub_to_segs[sid_str].add(global_idx)
 
-        # 1. Classificação e Hierarquia via Circuitos (Satélites)
+        # Classificar cada subestação
         for _, row in subs.iterrows():
             sid = str(row['COD_ID']).strip()
-            
             meus_untrd = untrd_por_sub.get(sid, pd.DataFrame())
-            sub_mae_final = None
             
             if not meus_untrd.empty:
                 circuitos_alimentadores = meus_untrd['CTMT'].unique()
@@ -304,9 +333,8 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
                     cat = "1. Distribuição Plena"
                 elif len(maes) > 0:
                     cat = "2. Distribuição Satélite"
-                    # Define a mãe (pega a primeira que não seja ela mesma)
                     outras_maes = [m for m in maes if m != sid]
-                    if outras_maes: sub_mae_final = outras_maes[0]
+                    if outras_maes: mae_por_id[sid] = outras_maes[0]
                 else:
                     cat = "1. Distribuição Plena (Circuito não mapeado)"
             elif sid in subs_com_untrs:
@@ -314,15 +342,56 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
             else:
                 cat = "4. Transporte/Manobra"
             
-            # 2. Hierarquia via Alta Tensão (Fallback para Transporte/Pura)
-            if not sub_mae_final and sid in conexoes_at:
-                sub_mae_final = conexoes_at[sid]
+            classificacao_por_id[sid] = cat
 
-            todas_classificacoes.append({
-                'COD_ID': sid,
-                'CLASSIFICACAO': cat,
-                'SUB_MAE': sub_mae_final
-            })
+    # Passo 2: Rastreamento Recursivo via Grafo de Fios (SSDAT)
+    print("DEBUG: [Classificação] Realizando busca recursiva na malha de fios (SSDAT)...")
+    for sid, cat in classificacao_por_id.items():
+        if sid not in mae_por_id and cat in ["3. Transformadora Pura", "4. Transporte/Manobra"]:
+            # Inicia BFS a partir dos segmentos que tocam esta subestação
+            meus_segs = sub_to_segs.get(sid, set())
+            visitados_seg = set(meus_segs)
+            fila_seg = [(s, 0) for s in meus_segs]
+            
+            while fila_seg:
+                seg_idx, dist = fila_seg.pop(0)
+                row_seg = seg_data[seg_idx]
+                
+                # 1. Verificar se este fio toca uma subestação PLENA
+                subs_tocadas = seg_to_subs.get(seg_idx, set())
+                achou = False
+                for s_tocada in subs_tocadas:
+                    if s_tocada != sid and classificacao_por_id.get(s_tocada) == "1. Distribuição Plena":
+                        mae_por_id[sid] = s_tocada
+                        achou = True
+                        break
+                if achou: break
+                
+                # 2. Verificar se este fio toca um PAC da ONS
+                p1, p2 = str(row_seg['PAC_1']), str(row_seg['PAC_2'])
+                for p in [p1, p2]:
+                    num_barra = p.replace('EXTERNO:AT_', '').strip()
+                    if num_barra in barra_para_ons:
+                        mae_por_id[sid] = f"ONS: {barra_para_ons[num_barra]}"
+                        achou = True
+                        break
+                if achou: break
+                
+                # 3. Continuar a busca pelos fios vizinhos
+                if dist < 50: # Limite de saltos de fios
+                    for p in [p1, p2]:
+                        for prox_seg in pac_to_segs.get(p, []):
+                            if prox_seg not in visitados_seg:
+                                visitados_seg.add(prox_seg)
+                                fila_seg.append((prox_seg, dist + 1))
+
+    # Consolidar resultados
+    for sid, cat in classificacao_por_id.items():
+        todas_classificacoes.append({
+            'COD_ID': sid,
+            'CLASSIFICACAO': cat,
+            'SUB_MAE': mae_por_id.get(sid)
+        })
             
     return pd.DataFrame(todas_classificacoes)
 
