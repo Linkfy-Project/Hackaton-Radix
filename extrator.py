@@ -41,14 +41,20 @@ PATHS = {
 # Mapeamento de camadas por distribuidora
 MAPA_CAMADAS_GDB = {
     'LIGHT': {
-        'SUB': 'SUB', 
+        'SUB': 'SUB',
         'TR_NOMINAL': 'UNTRS', # Transformadores para potência
-        'TR_GEOGRAFICO': 'UNTRD' # Transformadores para área real
+        'TR_GEOGRAFICO': 'UNTRD', # Transformadores para área real
+        'CTMT': 'CTMT', # Circuitos de Média Tensão
+        'BAR': 'BAR', # Barras
+        'SSDAT': 'SSDAT' # Segmentos de Alta Tensão
     },
     'ENEL': {
-        'SUB': 'SUB', 
+        'SUB': 'SUB',
         'TR_NOMINAL': 'UNTRAT', # Transformadores de AT para potência da subestação
-        'TR_GEOGRAFICO': 'UNTRMT' # Transformadores de MT para área real de atendimento
+        'TR_GEOGRAFICO': 'UNTRMT', # Transformadores de MT para área real de atendimento
+        'CTMT': 'CTMT',
+        'BAR': 'BAR',
+        'SSDAT': 'SSDAT'
     }
 }
 
@@ -232,10 +238,98 @@ def preencher_buracos_rj(gdf_areas: gpd.GeoDataFrame, gdf_subs_pontos: gpd.GeoDa
     print("DEBUG: [Hole Filler] Preenchimento concluído.")
     return gdf_areas_proj.to_crs(original_crs)
 
+# --- CLASSIFICAÇÃO E RASTREAMENTO ---
+
+def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFrame:
+    """
+    Aplica a lógica de classificação (Plena, Satélite, etc.) e rastreia quem alimenta quem.
+    """
+    print("DEBUG: [Classificação] Iniciando classificação e rastreamento hierárquico...")
+    
+    todas_classificacoes = []
+    todas_conexoes = []
+    
+    for data in all_subs_data:
+        subs = data['subs']
+        untrd = data['tr_geo']
+        ctmt = data['ctmt']
+        untrs = data['untrs']
+        bar = data['bar']
+        ssdat = data['ssdat']
+        dist = subs.iloc[0]['DISTRIBUIDORA']
+        
+        # Mapeamentos para busca rápida
+        circuito_para_mae = {}
+        if ctmt is not None:
+            circuito_para_mae = ctmt.set_index('COD_ID')['SUB'].to_dict()
+            
+        subs_com_untrs = set()
+        if untrs is not None:
+            subs_com_untrs = set(untrs['SUB'].unique())
+            
+        pac_to_sub = {}
+        if bar is not None:
+            pac_to_sub = bar.set_index('PAC')['SUB'].to_dict()
+            
+        # Otimização: Agrupar transformadores por subestação uma única vez
+        untrd_por_sub = {}
+        if untrd is not None:
+            print(f"DEBUG: [Classificação] Agrupando transformadores para {dist}...")
+            for sub_id, grupo in untrd.groupby('SUB'):
+                untrd_por_sub[str(sub_id).strip()] = grupo
+
+        # Otimização: Mapear conexões de Alta Tensão uma única vez
+        conexoes_at = {}
+        if ssdat is not None:
+            print(f"DEBUG: [Classificação] Mapeando topologia AT para {dist}...")
+            for _, line in ssdat.iterrows():
+                s1 = str(pac_to_sub.get(line['PAC_1'])).strip()
+                s2 = str(pac_to_sub.get(line['PAC_2'])).strip()
+                if s1 != "None" and s2 != "None" and s1 != s2:
+                    if s1 not in conexoes_at: conexoes_at[s1] = s2
+                    if s2 not in conexoes_at: conexoes_at[s2] = s1
+
+        # 1. Classificação e Hierarquia via Circuitos (Satélites)
+        for _, row in subs.iterrows():
+            sid = str(row['COD_ID']).strip()
+            
+            meus_untrd = untrd_por_sub.get(sid, pd.DataFrame())
+            sub_mae_final = None
+            
+            if not meus_untrd.empty:
+                circuitos_alimentadores = meus_untrd['CTMT'].unique()
+                maes = {str(circuito_para_mae.get(str(c))).strip() for c in circuitos_alimentadores if circuito_para_mae.get(str(c))}
+                
+                if sid in maes and len(maes) == 1:
+                    cat = "1. Distribuição Plena"
+                elif len(maes) > 0:
+                    cat = "2. Distribuição Satélite"
+                    # Define a mãe (pega a primeira que não seja ela mesma)
+                    outras_maes = [m for m in maes if m != sid]
+                    if outras_maes: sub_mae_final = outras_maes[0]
+                else:
+                    cat = "1. Distribuição Plena (Circuito não mapeado)"
+            elif sid in subs_com_untrs:
+                cat = "3. Transformadora Pura"
+            else:
+                cat = "4. Transporte/Manobra"
+            
+            # 2. Hierarquia via Alta Tensão (Fallback para Transporte/Pura)
+            if not sub_mae_final and sid in conexoes_at:
+                sub_mae_final = conexoes_at[sid]
+
+            todas_classificacoes.append({
+                'COD_ID': sid,
+                'CLASSIFICACAO': cat,
+                'SUB_MAE': sub_mae_final
+            })
+            
+    return pd.DataFrame(todas_classificacoes)
+
 # --- CORE PIPELINE ---
 
 def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
-    """Extrai subestações, potências e pontos de transformadores para área real."""
+    """Extrai subestações, potências, circuitos e topologia para classificação e rastreamento."""
     nome_arquivo = os.path.basename(caminho_gdb).upper()
     dist = 'ENEL' if 'ENEL' in nome_arquivo else 'LIGHT'
     
@@ -253,26 +347,47 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
             print(f"DEBUG: [Normalização] Renomeando 'NOME' para 'NOM' em {dist}")
             gdf_sub = gdf_sub.rename(columns={'NOME': 'NOM'})
         
-        # 2. Potência Nominal
+        # 2. Potência Nominal (UNTRS ou UNTRAT)
+        gdf_untrs = None
         if cfg['TR_NOMINAL'] in camadas:
-            gdf_tr_nom = gpd.read_file(caminho_gdb, layer=cfg['TR_NOMINAL'])
-            col = 'SUB' if 'SUB' in gdf_tr_nom.columns else None
+            gdf_untrs = gpd.read_file(caminho_gdb, layer=cfg['TR_NOMINAL'])
+            col = 'SUB' if 'SUB' in gdf_untrs.columns else None
             if col:
-                # BDGD usa POT_NOM para potência nominal
-                pot = gdf_tr_nom.groupby(col)['POT_NOM'].sum().reset_index()
+                pot = gdf_untrs.groupby(col)['POT_NOM'].sum().reset_index()
                 pot.columns = ['COD_ID', 'POTENCIA_CALCULADA']
                 gdf_sub = gdf_sub.merge(pot, on='COD_ID', how='left').fillna({'POTENCIA_CALCULADA': 0})
         
-        # 3. Transformadores Geográficos (para Área Real)
+        # 3. Transformadores Geográficos (UNTRD ou UNTRMT)
         gdf_tr_geo = None
         if cfg['TR_GEOGRAFICO'] in camadas:
-            gdf_tr_geo = gpd.read_file(caminho_gdb, layer=cfg['TR_GEOGRAFICO'], columns=['SUB', 'geometry'])
+            gdf_tr_geo = gpd.read_file(caminho_gdb, layer=cfg['TR_GEOGRAFICO'])
             gdf_tr_geo['SUB'] = gdf_tr_geo['SUB'].astype(str).str.strip()
+        
+        # 4. Circuitos (CTMT)
+        gdf_ctmt = None
+        if cfg['CTMT'] in camadas:
+            gdf_ctmt = gpd.read_file(caminho_gdb, layer=cfg['CTMT'])
+            
+        # 5. Topologia (BAR e SSDAT)
+        gdf_bar = None
+        if cfg['BAR'] in camadas:
+            gdf_bar = gpd.read_file(caminho_gdb, layer=cfg['BAR'])
+            
+        gdf_ssdat = None
+        if cfg['SSDAT'] in camadas:
+            gdf_ssdat = gpd.read_file(caminho_gdb, layer=cfg['SSDAT'])
         
         gdf_sub['DISTRIBUIDORA'] = dist
         gdf_sub['FONTE_GDB'] = os.path.basename(caminho_gdb)
         
-        return {'subs': gdf_sub, 'tr_geo': gdf_tr_geo}
+        return {
+            'subs': gdf_sub,
+            'tr_geo': gdf_tr_geo,
+            'ctmt': gdf_ctmt,
+            'untrs': gdf_untrs,
+            'bar': gdf_bar,
+            'ssdat': gdf_ssdat
+        }
     except Exception as e:
         print(f"DEBUG ERROR: Falha em {caminho_gdb}: {e}")
         return None
@@ -415,6 +530,10 @@ def run_pipeline():
         gdf_subs_all[cols_to_merge], 
         on='COD_ID', how='left'
     )
+
+    # 3.5 Classificação e Hierarquia
+    df_class = processar_classificacao_e_hierarquia(all_subs_data)
+    gdf_final_geo = gdf_final_geo.merge(df_class, on='COD_ID', how='left')
 
     # 4. Camadas de Estatísticas (Data Providers)
     # Usamos o shape do RJ para o bounding box das consultas

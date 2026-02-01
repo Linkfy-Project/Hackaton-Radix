@@ -59,9 +59,14 @@ def gerar_html_popup(row):
     cod_id = str(row['COD_ID'])
     pot_nom = row.get('POT_NOM', 0)
     dist = row.get('DISTRIBUIDORA', 'N/A')
+    classificacao = row.get('CLASSIFICACAO', 'Não Classificada')
+    mae = row.get('SUB_MAE', 'N/A')
     
     stats_html = f"<b>Área da SE: {row['NOM'] or cod_id}</b><br>"
     stats_html += f"Distribuidora: {dist}<br>"
+    stats_html += f"<b>Classificação: {classificacao}</b><br>"
+    if mae and mae != '0' and mae != 'None':
+        stats_html += f"Alimentada por (ID): {mae}<br>"
     stats_html += f"Potência: {row['POTENCIA_CALCULADA']:.2f} MVA<br>"
     if pot_nom and pot_nom > 0:
         stats_html += f"Potência Nominal: {pot_nom:.2f} MVA<br>"
@@ -137,7 +142,11 @@ def create_map_object(_rj_shape, _gdf_unificado):
     if _gdf_unificado is not None:
         areas_group = folium.FeatureGroup(name="Áreas de Atendimento Reais").add_to(m)
         sub_group = folium.FeatureGroup(name="Subestações").add_to(m)
+        hierarchy_group = folium.FeatureGroup(name="Hierarquia de Alimentação", show=False).add_to(m)
         
+        # Mapear coordenadas das subestações para desenhar as setas
+        coords_subs = {str(row['COD_ID']): (row['lat_sub'], row['lon_sub']) for _, row in _gdf_unificado.iterrows()}
+
         # Lista de cores vibrantes para diferenciar as áreas
         cores_vibrantes = [
             'red', 'blue', 'green', 'purple', 'orange', 'darkred', 
@@ -175,6 +184,31 @@ def create_map_object(_rj_shape, _gdf_unificado):
                 popup=folium.Popup(popup_content, max_width=300),
                 tooltip=f"SE: {row['NOM']} ({dist})"
             ).add_to(sub_group)
+            
+            # Desenha Seta de Alimentação (Hierarquia)
+            mae_id = str(row.get('SUB_MAE', ''))
+            if mae_id and mae_id in coords_subs and mae_id != str(row['COD_ID']):
+                mae_coords = coords_subs[mae_id]
+                filha_coords = (row['lat_sub'], row['lon_sub'])
+                
+                # Linha com seta
+                folium.PolyLine(
+                    locations=[mae_coords, filha_coords],
+                    color='yellow',
+                    weight=2,
+                    opacity=0.8,
+                    dash_array='5, 10',
+                    tooltip=f"Fluxo: {mae_id} -> {row['NOM']}"
+                ).add_to(hierarchy_group)
+                
+                # Adicionar um pequeno círculo na ponta para indicar direção
+                folium.CircleMarker(
+                    location=filha_coords,
+                    radius=3,
+                    color='yellow',
+                    fill=True,
+                    fill_color='yellow'
+                ).add_to(hierarchy_group)
             
     # Controles
     Fullscreen().add_to(m)
