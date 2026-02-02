@@ -45,8 +45,9 @@ def load_data():
     """
     Carrega o contorno do RJ e os dados unificados.
     """
-    print("DEBUG: Carregando contorno do Rio de Janeiro...")
-    rj_shape = geobr.read_municipality(code_muni=3304557, year=2020)
+    print("DEBUG: Carregando contorno do Estado do Rio de Janeiro...")
+    # Alterado de read_municipality para read_state para pegar o estado inteiro
+    rj_shape = geobr.read_state(code_state="RJ", year=2020)
     rj_shape = rj_shape.to_crs("EPSG:4326")
     
     print(f"DEBUG: Carregando dados unificados de {ARQUIVO_UNIFICADO}...")
@@ -65,6 +66,7 @@ def gerar_html_popup(row):
     dist = row.get('DISTRIBUIDORA', 'N/A')
     classificacao = row.get('CLASSIFICACAO', 'Não Classificada')
     mae = row.get('SUB_MAE', 'N/A')
+    
     stats_html = f'<div style="font-family: sans-serif; min-width: 250px; max-width: 300px;">'
     stats_html += f'<h4 style="margin: 0 0 10px 0; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px;">{row["NOM"] or cod_id}</h4>'
     stats_html += f"<b>Distribuidora:</b> {dist}<br>"
@@ -75,7 +77,7 @@ def gerar_html_popup(row):
     if pot_nom and pot_nom > 0:
         stats_html += f"<b>Potência Nominal:</b> {pot_nom:.2f} MVA<br>"
     
-    stats_html += "<div style='margin-top: 10px; padding: 8px; background: #f9f9f9; border-radius: 5px;'>"
+    stats_html += "<div style='margin-top: 10px; padding: 8px; background: #f9f9f9; border: 1px solid #eee;'>"
     stats_html += "<b>Estatísticas CNEFE:</b><br>"
     
     total_consumidores = 0
@@ -125,7 +127,6 @@ def gerar_html_popup(row):
     
     stats_html += "</div></div>"
     return stats_html
-    return stats_html
 
 def get_image_base64(icon_name):
     """
@@ -147,8 +148,8 @@ def create_map_object(_rj_shape, _gdf_unificado):
     print("DEBUG: Iniciando criação do objeto de mapa otimizado...")
     
     m = folium.Map(
-        location=[-22.9068, -43.1729], 
-        zoom_start=11, 
+        location=[-22.5, -42.5], # Centralizado mais para o meio do estado
+        zoom_start=8, # Zoom reduzido para ver o estado todo
         control_scale=True,
         prefer_canvas=True
     )
@@ -287,6 +288,45 @@ def main():
             m = create_map_object(rj_shape, gdf_unificado)
             st_folium(m, width=1200, height=700, returned_objects=[], use_container_width=True)
             
+            # --- LEGENDA ABAIXO DO MAPA ---
+            st.markdown("---")
+            st.subheader("📖 Legenda do Mapa")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.markdown("**Tipos de Subestação**")
+                
+                # Exibir ícones reais na legenda com HTML para controle total de proximidade
+                def get_legend_html(icon_name, label):
+                    b64 = get_image_base64(icon_name)
+                    return f'''
+                        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                            <img src="{b64}" height="25" style="margin-right: 10px;">
+                            <span style="font-size: 14px; font-weight: bold;">{label}</span>
+                        </div>
+                    '''
+
+                st.markdown(get_legend_html("raio.png", "Distribuição Plena"), unsafe_allow_html=True)
+                st.markdown(get_legend_html("satelite.png", "Distribuição Satélite"), unsafe_allow_html=True)
+                st.markdown(get_legend_html("transformador.png", "Transformadora Pura"), unsafe_allow_html=True)
+                st.markdown(get_legend_html("torre.png", "Transporte / Manobra"), unsafe_allow_html=True)
+                
+            with col2:
+                st.markdown("**Tamanho do Ícone**")
+                st.info("O tamanho do ícone é proporcional à **Potência Calculada** da subestação. Quanto maior o ícone, maior a capacidade de carga.")
+                
+            with col3:
+                st.markdown("**Distribuidoras**")
+                st.markdown("""
+                - <span style='color:red'>●</span> **LIGHT**: Marcadores Vermelhos
+                - <span style='color:blue'>●</span> **ENEL**: Marcadores Azuis
+                """, unsafe_allow_html=True)
+                
+            with col4:
+                st.markdown("**Camadas e Áreas**")
+                st.write("Use o controle no canto superior direito do mapa para alternar a visibilidade das áreas de atendimento e da hierarquia de fluxo.")
+
         except Exception as e:
             st.error(f"Erro ao carregar mapa: {e}")
             st.exception(e)
