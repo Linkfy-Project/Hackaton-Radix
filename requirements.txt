@@ -1,0 +1,13 @@
+geopandas
+geobr
+pandas
+shapely
+fiona
+requests
+tqdm
+streamlit
+folium
+streamlit-folium
+rtree
+pyproj
+pyogrio
