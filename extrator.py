@@ -21,6 +21,35 @@ import requests
 from tqdm import tqdm
 from typing import List, Dict, Optional
 
+# --- DICIONÁRIOS DE MAPEAMENTO ANEEL ---
+# Mapeamento de códigos TEN_NOM para valores reais em kV (Baseado no PRODIST/BDGD)
+# Este mapeamento foi refinado cruzando dados da LIGHT e ENEL RJ.
+MAPA_CODIGO_TENSAO = {
+    '94': 138.0,
+    '91': 69.0,
+    '82': 69.0,
+    '72': 34.5,
+    '67': 13.8,
+    '55': 13.8,
+    '49': 13.8,
+    '46': 13.8,
+    '45': 13.2,
+    '44': 11.9,
+    '42': 11.4,
+    '38': 12.7,
+    '22': 6.6,
+    '10': 2.3,
+    '7': 13.8,
+    '1': 0.127,
+    '2': 0.220,
+    '3': 0.380,
+    '4': 0.440,
+    '01': 0.127,
+    '02': 0.220,
+    '03': 0.380,
+    '04': 0.440
+}
+
 # --- CONFIGURAÇÕES GLOBAIS ---
 PASTA_DADOS_BRUTOS = "Dados Brutos"
 PASTA_SAIDA = "Dados Processados"
@@ -30,7 +59,8 @@ ARQUIVO_CONTROLE = os.path.join(PASTA_SAIDA, "controle_processamento.json")
 # Registro de Camadas de Dados (Data Providers)
 DATA_PROVIDERS_CONFIG = {
     'OSM': True,
-    'CNEFE': True
+    'CNEFE': True,
+    'CARGA': True
 }
 
 # Configurações de Caminhos Específicos
@@ -46,7 +76,13 @@ MAPA_CAMADAS_GDB = {
         'TR_GEOGRAFICO': 'UNTRD', # Transformadores para área real
         'CTMT': 'CTMT', # Circuitos de Média Tensão
         'BAR': 'BAR', # Barras
-        'SSDAT': 'SSDAT' # Segmentos de Alta Tensão
+        'SSDAT': 'SSDAT', # Segmentos de Alta Tensão
+        'UG_AT': 'UGAT_tab', # Geração Alta Tensão
+        'UG_MT': 'UGMT_tab', # Geração Média Tensão
+        'UG_BT': 'UGBT_tab', # Geração Baixa Tensão
+        'UC_AT': 'UCAT_tab', # Consumidores Alta Tensão
+        'UC_MT': 'UCMT_tab', # Consumidores Média Tensão
+        'UC_BT': 'UCBT_tab'  # Consumidores Baixa Tensão
     },
     'ENEL': {
         'SUB': 'SUB',
@@ -54,7 +90,13 @@ MAPA_CAMADAS_GDB = {
         'TR_GEOGRAFICO': 'UNTRMT', # Transformadores de MT para área real de atendimento
         'CTMT': 'CTMT',
         'BAR': 'BAR',
-        'SSDAT': 'SSDAT'
+        'SSDAT': 'SSDAT',
+        'UG_AT': 'UGAT_tab',
+        'UG_MT': 'UGMT_tab',
+        'UG_BT': 'UGBT_tab',
+        'UC_AT': 'UCAT_tab',
+        'UC_MT': 'UCMT_tab',
+        'UC_BT': 'UCBT_tab'
     }
 }
 
@@ -144,6 +186,87 @@ def provider_cnefe(areas_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
             
     if not all_stats: return pd.DataFrame()
     return pd.concat(all_stats).groupby(['COD_ID', 'COD_ESPECIE'])['count'].sum().unstack(fill_value=0)
+
+def provider_carga(caminho_gdb: str, dist: str) -> pd.DataFrame:
+    """
+    Extrai e agrega dados de carga (consumo e potência instalada) das tabelas UC do GDB.
+    Otimizado para processar milhões de registros usando fiona e agregação em memória.
+    """
+    print(f"DEBUG: [Provider Carga] Processando dados de consumo para {dist} (Otimizado)...")
+    cfg = MAPA_CAMADAS_GDB[dist]
+    camadas_uc = ['UC_AT', 'UC_MT', 'UC_BT']
+    
+    # Estrutura de agregação: { (sub_id, cat): [qtd, carga_total, energia_total] }
+    agg_data = {}
+
+    def normalizar_cat(cat):
+        cat = str(cat).upper()
+        if 'RES' in cat: return 'RES'
+        if 'IND' in cat: return 'IND'
+        if 'COM' in cat: return 'COM'
+        if 'RUR' in cat: return 'RUR'
+        return 'OUTROS'
+
+    try:
+        layers_in_gdb = fiona.listlayers(caminho_gdb)
+        for key in camadas_uc:
+            layer_name = cfg[key]
+            if layer_name in layers_in_gdb:
+                print(f"DEBUG: [Provider Carga] Lendo camada {layer_name}...")
+                with fiona.open(caminho_gdb, layer=layer_name) as src:
+                    # Identificar índices das colunas para acesso rápido
+                    cols = list(src.schema['properties'].keys())
+                    idx_sub = cols.index('SUB') if 'SUB' in cols else -1
+                    idx_tip = cols.index('TIP_CC') if 'TIP_CC' in cols else -1
+                    idx_car = cols.index('CAR_INST') if 'CAR_INST' in cols else -1
+                    cols_ene = [cols.index(c) for c in cols if c.startswith('ENE_')]
+
+                    if idx_sub == -1 or idx_tip == -1:
+                        continue
+
+                    for feat in tqdm(src, desc=f"Agregando {layer_name}", leave=False):
+                        props = feat['properties']
+                        sub_id = str(props['SUB']).strip()
+                        if not sub_id or sub_id == 'None': continue
+                        
+                        cat = normalizar_cat(props['TIP_CC'])
+                        carga = float(props.get('CAR_INST') or 0)
+                        
+                        # Média das energias
+                        ene_vals = [float(props.get(cols[i]) or 0) for i in cols_ene]
+                        energia_med = sum(ene_vals) / len(ene_vals) if ene_vals else 0
+                        
+                        key_agg = (sub_id, cat)
+                        if key_agg not in agg_data:
+                            agg_data[key_agg] = [0, 0.0, 0.0]
+                        
+                        agg_data[key_agg][0] += 1
+                        agg_data[key_agg][1] += carga
+                        agg_data[key_agg][2] += energia_med
+
+        if not agg_data: return pd.DataFrame()
+
+        # Converter para DataFrame
+        rows = []
+        for (sid, cat), values in agg_data.items():
+            rows.append({'COD_ID': sid, 'CAT': cat, 'QTD': values[0], 'CARGA': values[1], 'ENERGIA': values[2]})
+        
+        final_df = pd.DataFrame(rows)
+        
+        # Pivotar para ter colunas como CARGA_RES, QTD_RES, ENERGIA_RES, etc.
+        pivot_qtd = final_df.pivot(index='COD_ID', columns='CAT', values='QTD').add_prefix('QTD_')
+        pivot_carga = final_df.pivot(index='COD_ID', columns='CAT', values='CARGA').add_prefix('CARGA_')
+        pivot_energia = final_df.pivot(index='COD_ID', columns='CAT', values='ENERGIA').add_prefix('ENERGIA_')
+        
+        res = pd.concat([pivot_qtd, pivot_carga, pivot_energia], axis=1).fillna(0)
+        res.index = res.index.astype(str)
+        return res
+        
+    except Exception as e:
+        print(f"DEBUG ERROR: [Provider Carga] {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
 
 # --- FUNÇÕES DE GEOPROCESSAMENTO AVANÇADO ---
 
@@ -247,15 +370,16 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
     """
     print("DEBUG: [Classificação] Iniciando classificação e rastreamento hierárquico...")
     
-    # 0. Carregar Dados ONS para mapeamento de fronteira
+    # 0. Carregar Dados ONS para mapeamento de fronteira (Otimizado)
     path_ons_sub = "Dados Brutos/ONS/SUBESTACAO.csv"
     barra_para_ons = {}
     if os.path.exists(path_ons_sub):
-        print("DEBUG: [Classificação] Carregando base de subestações ONS...")
-        df_ons = pd.read_csv(path_ons_sub, sep=';', encoding='latin1')
-        for _, row in df_ons.iterrows():
-            if not pd.isna(row['num_barra']):
-                barra_para_ons[str(int(row['num_barra']))] = row['nom_subestacao']
+        print("DEBUG: [Classificação] Carregando base de subestações ONS (Otimizado)...")
+        # Carrega apenas as colunas necessárias para ganhar velocidade
+        df_ons = pd.read_csv(path_ons_sub, sep=';', encoding='latin1', usecols=['num_barra', 'nom_subestacao'])
+        df_ons = df_ons.dropna(subset=['num_barra'])
+        # Cria o dicionário de mapeamento de forma vetorizada
+        barra_para_ons = dict(zip(df_ons['num_barra'].astype(int).astype(str), df_ons['nom_subestacao']))
 
     todas_classificacoes = []
     classificacao_por_id = {}
@@ -275,12 +399,10 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
         untrs = data['untrs']
         bar = data['bar']
         ssdat = data['ssdat']
-        dist = subs.iloc[0]['DISTRIBUIDORA']
         
         # Mapeamentos base do GDB
         circuito_para_mae = ctmt.set_index('COD_ID')['SUB'].to_dict() if ctmt is not None else {}
         subs_com_untrs = set(untrs['SUB'].unique()) if untrs is not None else set()
-        pac_to_sub = bar.set_index('PAC')['SUB'].to_dict() if bar is not None else {}
         
         # Agrupar transformadores para classificação
         untrd_por_sub = {}
@@ -310,7 +432,6 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
                 
                 # Subestações tocadas por este segmento
                 if idx in spatial_join.index:
-                    # O sjoin pode renomear a coluna se houver colisão
                     col_id = 'COD_ID' if 'COD_ID' in spatial_join.columns else 'COD_ID_right'
                     sids = spatial_join.loc[[idx], col_id].unique()
                     for sid in sids:
@@ -336,7 +457,8 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
                     outras_maes = [m for m in maes if m != sid]
                     if outras_maes: mae_por_id[sid] = outras_maes[0]
                 else:
-                    cat = "1. Distribuição Plena (Circuito não mapeado)"
+                    # Unificado conforme pedido do usuário (Plena mesmo sem circuito mapeado)
+                    cat = "1. Distribuição Plena"
             elif sid in subs_com_untrs:
                 cat = "3. Transformadora Pura"
             else:
@@ -348,7 +470,6 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
     print("DEBUG: [Classificação] Realizando busca recursiva na malha de fios (SSDAT)...")
     for sid, cat in classificacao_por_id.items():
         if sid not in mae_por_id and cat in ["3. Transformadora Pura", "4. Transporte/Manobra"]:
-            # Inicia BFS a partir dos segmentos que tocam esta subestação
             meus_segs = sub_to_segs.get(sid, set())
             visitados_seg = set(meus_segs)
             fila_seg = [(s, 0) for s in meus_segs]
@@ -357,7 +478,6 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
                 seg_idx, dist = fila_seg.pop(0)
                 row_seg = seg_data[seg_idx]
                 
-                # 1. Verificar se este fio toca uma subestação PLENA
                 subs_tocadas = seg_to_subs.get(seg_idx, set())
                 achou = False
                 for s_tocada in subs_tocadas:
@@ -367,7 +487,6 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
                         break
                 if achou: break
                 
-                # 2. Verificar se este fio toca um PAC da ONS
                 p1, p2 = str(row_seg['PAC_1']), str(row_seg['PAC_2'])
                 for p in [p1, p2]:
                     num_barra = p.replace('EXTERNO:AT_', '').strip()
@@ -377,15 +496,13 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
                         break
                 if achou: break
                 
-                # 3. Continuar a busca pelos fios vizinhos
-                if dist < 50: # Limite de saltos de fios
+                if dist < 50:
                     for p in [p1, p2]:
                         for prox_seg in pac_to_segs.get(p, []):
                             if prox_seg not in visitados_seg:
                                 visitados_seg.add(prox_seg)
                                 fila_seg.append((prox_seg, dist + 1))
 
-    # Consolidar resultados
     for sid, cat in classificacao_por_id.items():
         todas_classificacoes.append({
             'COD_ID': sid,
@@ -398,7 +515,7 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
 # --- CORE PIPELINE ---
 
 def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
-    """Extrai subestações, potências, circuitos e topologia para classificação e rastreamento."""
+    """Extrai subestações, potências, circuitos, topologia, geração e tensão nominal."""
     nome_arquivo = os.path.basename(caminho_gdb).upper()
     dist = 'ENEL' if 'ENEL' in nome_arquivo else 'LIGHT'
     
@@ -408,15 +525,13 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
         
         if cfg['SUB'] not in camadas: return None
         
-        # 1. Subestações (Pontos ou Polígonos)
         gdf_sub = gpd.read_file(caminho_gdb, layer=cfg['SUB'])
         
-        # Normalização de colunas: ENEL usa 'NOME', Light usa 'NOM'
         if 'NOME' in gdf_sub.columns and 'NOM' not in gdf_sub.columns:
             print(f"DEBUG: [Normalização] Renomeando 'NOME' para 'NOM' em {dist}")
             gdf_sub = gdf_sub.rename(columns={'NOME': 'NOM'})
         
-        # 2. Potência Nominal (UNTRS ou UNTRAT)
+        # 1. Potência de Transformação
         gdf_untrs = None
         if cfg['TR_NOMINAL'] in camadas:
             gdf_untrs = gpd.read_file(caminho_gdb, layer=cfg['TR_NOMINAL'])
@@ -426,18 +541,89 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
                 pot.columns = ['COD_ID', 'POTENCIA_CALCULADA']
                 gdf_sub = gdf_sub.merge(pot, on='COD_ID', how='left').fillna({'POTENCIA_CALCULADA': 0})
         
-        # 3. Transformadores Geográficos (UNTRD ou UNTRMT)
+        # 2. Tensão Nominal (Com Mapeamento de Códigos ANEEL)
+        ten_por_sub = {}
+        
+        # Busca nas Barras
+        if cfg['BAR'] in camadas:
+            gdf_bar_temp = gpd.read_file(caminho_gdb, layer=cfg['BAR'])
+            if 'SUB' in gdf_bar_temp.columns and 'TEN_NOM' in gdf_bar_temp.columns:
+                for sub_id, group in gdf_bar_temp.groupby('SUB'):
+                    for sub_id, group in gdf_bar_temp.groupby('SUB'):
+                        codes = group['TEN_NOM'].astype(str).unique()
+                        # Lógica de Proteção: Ignorar tensões de Baixa Tensão (< 2.3kV) para Subestações
+                        # Isso evita que serviços auxiliares (127V/220V) sejam confundidos com a tensão da SE.
+                        kvs = [MAPA_CODIGO_TENSAO.get(c, 0) for c in codes if MAPA_CODIGO_TENSAO.get(c, 0) >= 2.3]
+                        if kvs: ten_por_sub[str(sub_id)] = max(kvs)
+    
+            # Busca nos Circuitos (MT e AT) como fallback ou complemento
+            for camada_circ in ['CTMT', 'SSDAT']:
+                if cfg[camada_circ] in camadas:
+                    gdf_circ = gpd.read_file(caminho_gdb, layer=cfg[camada_circ])
+                    if 'SUB' in gdf_circ.columns and 'TEN_NOM' in gdf_circ.columns:
+                        for sub_id, group in gdf_circ.groupby('SUB'):
+                            sid_str = str(sub_id)
+                            codes = group['TEN_NOM'].astype(str).unique()
+                            # Aplicando a mesma proteção para circuitos
+                            kvs = [MAPA_CODIGO_TENSAO.get(c, 0) for c in codes if MAPA_CODIGO_TENSAO.get(c, 0) >= 2.3]
+                            if kvs:
+                                current_max = ten_por_sub.get(sid_str, 0)
+                                ten_por_sub[sid_str] = max(current_max, max(kvs))
+        # Fallback: Se a subestação não tem tensão nas barras ou circuitos diretos,
+        # busca a tensão dos circuitos que alimentam seus transformadores.
+        if cfg['TR_GEOGRAFICO'] in camadas and cfg['CTMT'] in camadas:
+            gdf_tr_temp = gpd.read_file(caminho_gdb, layer=cfg['TR_GEOGRAFICO'])
+            gdf_ctmt_temp = gpd.read_file(caminho_gdb, layer=cfg['CTMT'])
+            
+            if 'SUB' in gdf_tr_temp.columns and 'CTMT' in gdf_tr_temp.columns and 'TEN_NOM' in gdf_ctmt_temp.columns:
+                # Mapeamento de Circuito -> Tensão
+                mapa_circ_ten = {}
+                for _, c_row in gdf_ctmt_temp.iterrows():
+                    c_id = str(c_row['COD_ID'])
+                    c_ten_code = str(c_row['TEN_NOM'])
+                    c_kv = MAPA_CODIGO_TENSAO.get(c_ten_code, 0)
+                    if c_kv >= 2.3:
+                        mapa_circ_ten[c_id] = max(mapa_circ_ten.get(c_id, 0), c_kv)
+                
+                # Para cada subestação sem tensão, olha os transformadores
+                for sub_id in gdf_sub['COD_ID'].astype(str).unique():
+                    if ten_por_sub.get(sub_id, 0) == 0:
+                        meus_trs = gdf_tr_temp[gdf_tr_temp['SUB'].astype(str) == sub_id]
+                        if not meus_trs.empty:
+                            meus_circs = meus_trs['CTMT'].astype(str).unique()
+                            kvs_circs = [mapa_circ_ten.get(c, 0) for c in meus_circs if mapa_circ_ten.get(c, 0) > 0]
+                            if kvs_circs:
+                                ten_por_sub[sub_id] = max(kvs_circs)
+
+        gdf_sub['TENSAO_NOMINAL'] = gdf_sub['COD_ID'].astype(str).map(ten_por_sub).fillna(0)
+
+        # 3. Geração Distribuída
+        pot_geracao_total = pd.DataFrame(columns=['COD_ID', 'POT_INST'])
+        for camada_ug in ['UG_AT', 'UG_MT', 'UG_BT']:
+            nome_camada = cfg[camada_ug]
+            if nome_camada in camadas:
+                gdf_ug = gpd.read_file(caminho_gdb, layer=nome_camada)
+                if 'SUB' in gdf_ug.columns and 'POT_INST' in gdf_ug.columns:
+                    ug_sum = gdf_ug.groupby('SUB')['POT_INST'].sum().reset_index()
+                    ug_sum.columns = ['COD_ID', 'POT_INST']
+                    pot_geracao_total = pd.concat([pot_geracao_total, ug_sum])
+        
+        if not pot_geracao_total.empty:
+            pot_geracao_final = pot_geracao_total.groupby('COD_ID')['POT_INST'].sum().reset_index()
+            pot_geracao_final.columns = ['COD_ID', 'GERACAO_GD_KW']
+            gdf_sub = gdf_sub.merge(pot_geracao_final, on='COD_ID', how='left').fillna({'GERACAO_GD_KW': 0})
+        else:
+            gdf_sub['GERACAO_GD_KW'] = 0
+
         gdf_tr_geo = None
         if cfg['TR_GEOGRAFICO'] in camadas:
             gdf_tr_geo = gpd.read_file(caminho_gdb, layer=cfg['TR_GEOGRAFICO'])
             gdf_tr_geo['SUB'] = gdf_tr_geo['SUB'].astype(str).str.strip()
         
-        # 4. Circuitos (CTMT)
         gdf_ctmt = None
         if cfg['CTMT'] in camadas:
             gdf_ctmt = gpd.read_file(caminho_gdb, layer=cfg['CTMT'])
             
-        # 5. Topologia (BAR e SSDAT)
         gdf_bar = None
         if cfg['BAR'] in camadas:
             gdf_bar = gpd.read_file(caminho_gdb, layer=cfg['BAR'])
@@ -455,7 +641,8 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
             'ctmt': gdf_ctmt,
             'untrs': gdf_untrs,
             'bar': gdf_bar,
-            'ssdat': gdf_ssdat
+            'ssdat': gdf_ssdat,
+            'carga': provider_carga(caminho_gdb, dist) if DATA_PROVIDERS_CONFIG.get('CARGA') else None
         }
     except Exception as e:
         print(f"DEBUG ERROR: Falha em {caminho_gdb}: {e}")
@@ -480,7 +667,6 @@ def run_pipeline():
         print("DEBUG: Tudo atualizado. Nada a fazer.")
         return
 
-    # 1. Gerar Áreas Reais (Convex Hull ou Ponto Bufferizado)
     print("DEBUG: Gerando áreas iniciais de atendimento...")
     poligonos_reais = []
     
@@ -488,7 +674,6 @@ def run_pipeline():
         gdf_subs = data['subs']
         gdf_tr = data['tr_geo']
         
-        # Mapear transformadores por subestação para busca rápida
         tr_por_sub = {}
         if gdf_tr is not None:
             for sub_id, grupo in gdf_tr.groupby('SUB'):
@@ -499,13 +684,9 @@ def run_pipeline():
             grupo_tr = tr_por_sub.get(sub_id)
             
             if grupo_tr is not None and len(grupo_tr) >= 3:
-                # Caso normal: Convex Hull dos transformadores
                 area = grupo_tr.geometry.union_all().convex_hull
             else:
-                # Caso especial (ex: Galeão): Subestação sem transformadores georeferenciados suficentes
-                # Criamos uma área mínima (buffer de ~10m) para garantir que a subestação exista no processo
-                # e possa "reclamar" território via Voronoi posteriormente.
-                area = sub_row.geometry.centroid.buffer(0.0001) 
+                area = sub_row.geometry.centroid.buffer(0.0001)
                 
             poligonos_reais.append({'COD_ID': sub_id, 'geometry': area})
 
@@ -515,18 +696,15 @@ def run_pipeline():
 
     gdf_areas = gpd.GeoDataFrame(poligonos_reais, crs=all_subs_data[0]['subs'].crs).to_crs("EPSG:4326")
     
-    # 2. Resolver Sobreposições (Abordagem de Prioridade por Potência + Contenção)
     print("DEBUG: Resolvendo sobreposições territoriais...")
-    # Unifica todos os pontos de subestações para pegar a potência
     gdf_subs_all = pd.concat([d['subs'] for d in all_subs_data], ignore_index=True)
     gdf_subs_all['COD_ID'] = gdf_subs_all['COD_ID'].astype(str)
     
-    # Merge potência com as áreas para ordenar
     gdf_areas['COD_ID'] = gdf_areas['COD_ID'].astype(str)
-    gdf_areas = gdf_areas.merge(gdf_subs_all[['COD_ID', 'POTENCIA_CALCULADA', 'NOM', 'DISTRIBUIDORA']], on='COD_ID', how='left')
+    colunas_subs = ['COD_ID', 'POTENCIA_CALCULADA', 'NOM', 'DISTRIBUIDORA', 'TENSAO_NOMINAL', 'GERACAO_GD_KW']
+    colunas_existentes = [c for c in colunas_subs if c in gdf_subs_all.columns]
+    gdf_areas = gdf_areas.merge(gdf_subs_all[colunas_existentes], on='COD_ID', how='left')
     
-    # Lógica de Prioridade: Subestações que estão dentro de outras áreas devem ser processadas primeiro
-    # para garantir que "esculpam" seu espaço e não sejam absorvidas pela subestação maior.
     print("DEBUG: Calculando hierarquia de contenção para resolução de conflitos...")
     gdf_subs_pontos_temp = gpd.GeoDataFrame(gdf_subs_all, crs=all_subs_data[0]['subs'].crs)
     gdf_subs_pontos_temp = gdf_subs_pontos_temp.to_crs("EPSG:31983")
@@ -539,13 +717,10 @@ def run_pipeline():
         ponto = gdf_subs_pontos_temp[gdf_subs_pontos_temp['COD_ID'] == row['COD_ID']].geometry
         if ponto.empty: return 0
         ponto = ponto.iloc[0]
-        # Encontra polígonos que contêm este ponto
         matches = sindex.query(ponto, predicate='within')
-        return len(matches) - 1 # Desconta o próprio polígono
+        return len(matches) - 1
 
     gdf_areas['DEPTH'] = gdf_areas.apply(get_containment_depth, axis=1)
-    
-    # Ordenar por profundidade (mais internas primeiro) e depois por potência
     gdf_areas = gdf_areas.sort_values(by=['DEPTH', 'POTENCIA_CALCULADA'], ascending=[False, False])
     
     areas_limpas = []
@@ -565,16 +740,13 @@ def run_pipeline():
     
     gdf_final_geo = gpd.GeoDataFrame(areas_limpas, crs="EPSG:4326")
 
-    # --- NOVO PASSO: Preencher Buracos no Estado do RJ ---
     print("DEBUG: Obtendo fronteiras do estado do Rio de Janeiro via geobr...")
     rj_state = geobr.read_state(code_state="RJ", year=2020)
     
-    # Preparar pontos das subestações para o Voronoi
     gdf_subs_pontos = gdf_subs_all.copy()
     if not isinstance(gdf_subs_pontos, gpd.GeoDataFrame):
         gdf_subs_pontos = gpd.GeoDataFrame(gdf_subs_pontos, crs=all_subs_data[0]['subs'].crs)
     
-    # Garantir que temos pontos (centroides se forem polígonos)
     gdf_subs_pontos = gdf_subs_pontos.to_crs("EPSG:31983")
     gdf_subs_pontos['geometry'] = gdf_subs_pontos.geometry.centroid
     gdf_subs_pontos = gdf_subs_pontos.to_crs("EPSG:4326")
@@ -582,7 +754,6 @@ def run_pipeline():
 
     gdf_final_geo = preencher_buracos_rj(gdf_final_geo, gdf_subs_pontos, rj_state)
 
-    # 3. Adicionar Centroides (para os marcadores no mapa)
     print("DEBUG: Mapeando localizações das subestações...")
     gdf_subs_all = gpd.GeoDataFrame(gdf_subs_all, crs=all_subs_data[0]['subs'].crs)
     gdf_subs_all = gdf_subs_all.to_crs("EPSG:31983")
@@ -590,29 +761,31 @@ def run_pipeline():
     gdf_subs_all = gdf_subs_all.to_crs("EPSG:4326")
     gdf_subs_all['lat_sub'], gdf_subs_all['lon_sub'] = gdf_subs_all.geometry.y, gdf_subs_all.geometry.x
     
-    # Merge das coordenadas de volta para o GeoDataFrame de áreas
     cols_to_merge = ['COD_ID', 'lat_sub', 'lon_sub']
     if 'POT_NOM' in gdf_subs_all.columns:
         cols_to_merge.append('POT_NOM')
         
     gdf_final_geo = gdf_final_geo.merge(
-        gdf_subs_all[cols_to_merge], 
+        gdf_subs_all[cols_to_merge],
         on='COD_ID', how='left'
     )
 
-    # 3.5 Classificação e Hierarquia
     df_class = processar_classificacao_e_hierarquia(all_subs_data)
     gdf_final_geo = gdf_final_geo.merge(df_class, on='COD_ID', how='left')
 
-    # 4. Camadas de Estatísticas (Data Providers)
-    # Usamos o shape do RJ para o bounding box das consultas
     bounds = rj_state.to_crs("EPSG:4326").total_bounds
     
     stats_frames = []
     if DATA_PROVIDERS_CONFIG['OSM']: stats_frames.append(provider_osm(gdf_final_geo, bounds))
     if DATA_PROVIDERS_CONFIG['CNEFE']: stats_frames.append(provider_cnefe(gdf_final_geo))
+    
+    # Integrar dados de carga extraídos dos GDBs
+    df_carga_all = pd.concat([d['carga'] for d in all_subs_data if d['carga'] is not None])
+    if not df_carga_all.empty:
+        # Garantir que o índice seja string para o merge
+        df_carga_all.index = df_carga_all.index.astype(str)
+        stats_frames.append(df_carga_all)
 
-    # 5. Unificação Final
     print("DEBUG: Unificando todas as camadas de dados...")
     for df_stats in stats_frames:
         if not df_stats.empty:
@@ -622,10 +795,8 @@ def run_pipeline():
     gdf_final_geo = gdf_final_geo.fillna(0)
     gdf_final_geo.columns = [str(c) for c in gdf_final_geo.columns]
 
-    # --- OTIMIZAÇÃO: Simplificação Ultra-Fina (1 metro) ---
     print("DEBUG: Aplicando simplificação de geometria (1m de tolerância)...")
     original_crs = gdf_final_geo.crs
-    # Simplifica em metros para precisão técnica
     gdf_final_geo = gdf_final_geo.to_crs("EPSG:31983")
     gdf_final_geo['geometry'] = gdf_final_geo.simplify(tolerance=1.0, preserve_topology=True)
     gdf_final_geo = gdf_final_geo.to_crs(original_crs)

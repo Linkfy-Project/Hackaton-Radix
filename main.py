@@ -66,6 +66,8 @@ def gerar_html_popup(row):
     dist = row.get('DISTRIBUIDORA', 'N/A')
     classificacao = row.get('CLASSIFICACAO', 'Não Classificada')
     mae = row.get('SUB_MAE', 'N/A')
+    tensao = row.get('TENSAO_NOMINAL', 0)
+    geracao = row.get('GERACAO_GD_KW', 0)
     
     stats_html = f'<div style="font-family: sans-serif; min-width: 250px; max-width: 300px;">'
     stats_html += f'<h4 style="margin: 0 0 10px 0; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px;">{row["NOM"] or cod_id}</h4>'
@@ -73,10 +75,16 @@ def gerar_html_popup(row):
     stats_html += f"<b>Classificação:</b> {classificacao}<br>"
     if mae and mae != '0' and mae != 'None':
         stats_html += f"<b>Alimentada por (ID):</b> {mae}<br>"
+    
+    if tensao and tensao > 0:
+        stats_html += f"<b>Tensão Nominal:</b> {tensao} kV<br>"
+        
     stats_html += f"<b>Potência:</b> {row['POTENCIA_CALCULADA']:.2f} MVA<br>"
     if pot_nom and pot_nom > 0:
         stats_html += f"<b>Potência Nominal:</b> {pot_nom:.2f} MVA<br>"
-    
+        
+    if geracao and geracao > 0:
+        stats_html += f"<b style='color: #2e7d32;'>Geração Solar (GD):</b> {geracao:.2f} kW<br>"
     stats_html += "<div style='margin-top: 10px; padding: 8px; background: #f9f9f9; border: 1px solid #eee;'>"
     stats_html += "<b>Estatísticas CNEFE:</b><br>"
     
@@ -125,6 +133,32 @@ def gerar_html_popup(row):
     else:
         stats_html += "<br><i>Sem dados do CNEFE para esta área.</i>"
     
+    # --- SEÇÃO DE CARGA E CONSUMO (BDGD) ---
+    stats_html += "<div style='margin-top: 10px; padding: 8px; background: #e3f2fd; border: 1px solid #bbdefb;'>"
+    stats_html += "<b>Carga e Consumo (BDGD):</b><br>"
+    
+    tem_carga = False
+    for cat in ['RES', 'IND', 'COM', 'RUR', 'OUTROS']:
+        qtd = row.get(f'QTD_{cat}', 0)
+        if qtd > 0:
+            tem_carga = True
+            carga = row.get(f'CARGA_{cat}', 0)
+            energia = row.get(f'ENERGIA_{cat}', 0)
+            
+            cat_nome = {
+                'RES': 'Residencial', 'IND': 'Industrial', 'COM': 'Comercial',
+                'RUR': 'Rural', 'OUTROS': 'Outros'
+            }.get(cat, cat)
+            
+            stats_html += f"<div style='margin-top: 5px; border-bottom: 1px solid #eee; padding-bottom: 3px;'>"
+            stats_html += f"<b>{cat_nome}:</b> {int(qtd)} medidores<br>"
+            stats_html += f"&nbsp;&nbsp;• Carga Inst.: {carga:,.1f} kW/kVA<br>"
+            stats_html += f"&nbsp;&nbsp;• Consumo Médio: {energia:,.1f} kWh/mês"
+            stats_html += f"</div>"
+            
+    if not tem_carga:
+        stats_html += "<i>Sem dados de carga vinculados.</i>"
+        
     stats_html += "</div></div>"
     return stats_html
 
