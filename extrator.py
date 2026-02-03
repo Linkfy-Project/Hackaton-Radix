@@ -29,13 +29,10 @@ ARQUIVO_CONTROLE = os.path.join(PASTA_SAIDA, "controle_processamento.json")
 
 # Registro de Camadas de Dados (Data Providers)
 DATA_PROVIDERS_CONFIG = {
-    'OSM': True,
-    'CNEFE': True
 }
 
 # Configurações de Caminhos Específicos
 PATHS = {
-    'CNEFE': r"Dados Brutos/CNFE IBGE/CNEFE_RJ.csv"
 }
 
 # Mapeamento de camadas por distribuidora
@@ -88,62 +85,6 @@ class DataManager:
 
     def update_mtime(self, file_path: str):
         self.data[os.path.basename(file_path)] = {'mtime': os.path.getmtime(file_path)}
-
-# --- DATA PROVIDERS (CAMADAS DE ESTATÍSTICA) ---
-
-def provider_osm(areas_gdf: gpd.GeoDataFrame, bounds: List[float]) -> pd.DataFrame:
-    """Obtém dados de comércio e indústria do OpenStreetMap."""
-    print("DEBUG: [Provider OSM] Consultando API Overpass...")
-    bbox = f"{bounds[1]}, {bounds[0]}, {bounds[3]}, {bounds[2]}"
-    query = f"""
-    [out:json][timeout:180];
-    (node["shop"]({bbox}); way["shop"]({bbox});
-     node["landuse"="industrial"]({bbox}); way["landuse"="industrial"]({bbox});
-     node["industrial"]({bbox}); way["industrial"]({bbox}););
-    out center;
-    """
-    try:
-        response = requests.post("https://overpass-api.de/api/interpreter", data={'data': query})
-        response.raise_for_status()
-        elements = response.json().get('elements', [])
-        points = []
-        for el in elements:
-            lat = el.get('lat') or el.get('center', {}).get('lat')
-            lon = el.get('lon') or el.get('center', {}).get('lon')
-            if lat and lon:
-                category = 'OSM_SHOP' if 'shop' in el.get('tags', {}) else 'OSM_INDUSTRIAL'
-                points.append({'lat': lat, 'lon': lon, 'category': category})
-        
-        if not points: return pd.DataFrame()
-        
-        df = pd.DataFrame(points)
-        gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
-        joined = gpd.sjoin(gdf, areas_gdf[['COD_ID', 'geometry']], how='inner', predicate='within')
-        return joined.groupby(['COD_ID', 'category']).size().unstack(fill_value=0)
-    except Exception as e:
-        print(f"DEBUG ERROR: [Provider OSM] {e}")
-        return pd.DataFrame()
-
-def provider_cnefe(areas_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
-    """Processa os milhões de pontos do CNEFE IBGE."""
-    path = PATHS['CNEFE']
-    if not os.path.exists(path):
-        print(f"DEBUG WARNING: [Provider CNEFE] Arquivo não encontrado em {path}")
-        return pd.DataFrame()
-
-    print(f"DEBUG: [Provider CNEFE] Processando Big Data...")
-    all_stats = []
-    with tqdm(total=9000000, desc="CNEFE") as pbar:
-        for chunk in pd.read_csv(path, sep=';', usecols=['LATITUDE', 'LONGITUDE', 'COD_ESPECIE'], chunksize=300000):
-            chunk = chunk.dropna(subset=['LATITUDE', 'LONGITUDE'])
-            gdf_chunk = gpd.GeoDataFrame(chunk, geometry=gpd.points_from_xy(chunk.LONGITUDE, chunk.LATITUDE), crs="EPSG:4326")
-            joined = gpd.sjoin(gdf_chunk, areas_gdf[['COD_ID', 'geometry']], how='inner', predicate='within')
-            if not joined.empty:
-                all_stats.append(joined.groupby(['COD_ID', 'COD_ESPECIE']).size().reset_index(name='count'))
-            pbar.update(len(chunk))
-            
-    if not all_stats: return pd.DataFrame()
-    return pd.concat(all_stats).groupby(['COD_ID', 'COD_ESPECIE'])['count'].sum().unstack(fill_value=0)
 
 # --- FUNÇÕES DE GEOPROCESSAMENTO AVANÇADO ---
 
@@ -604,20 +545,8 @@ def run_pipeline():
     df_class = processar_classificacao_e_hierarquia(all_subs_data)
     gdf_final_geo = gdf_final_geo.merge(df_class, on='COD_ID', how='left')
 
-    # 4. Camadas de Estatísticas (Data Providers)
-    # Usamos o shape do RJ para o bounding box das consultas
-    bounds = rj_state.to_crs("EPSG:4326").total_bounds
-    
-    stats_frames = []
-    if DATA_PROVIDERS_CONFIG['OSM']: stats_frames.append(provider_osm(gdf_final_geo, bounds))
-    if DATA_PROVIDERS_CONFIG['CNEFE']: stats_frames.append(provider_cnefe(gdf_final_geo))
-
-    # 5. Unificação Final
+    # 4. Unificação Final
     print("DEBUG: Unificando todas as camadas de dados...")
-    for df_stats in stats_frames:
-        if not df_stats.empty:
-            df_stats.index = df_stats.index.astype(str)
-            gdf_final_geo = gdf_final_geo.merge(df_stats, left_on='COD_ID', right_index=True, how='left')
 
     gdf_final_geo = gdf_final_geo.fillna(0)
     gdf_final_geo.columns = [str(c) for c in gdf_final_geo.columns]
