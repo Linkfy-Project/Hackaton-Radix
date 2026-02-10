@@ -1,4 +1,4 @@
-# Projeto de Mapeamento de Subestações - LIGHT & ENEL RJ
+# Projeto de Mapeamento de Subestações - Brasil
 
 Este projeto consiste em uma ferramenta de Big Data e Geoprocessamento para extrair, processar e visualizar a infraestrutura elétrica das distribuidoras LIGHT e ENEL no estado do Rio de Janeiro.
 
