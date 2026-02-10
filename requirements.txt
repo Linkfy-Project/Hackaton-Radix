@@ -1,0 +1,14 @@
+streamlit
+streamlit-folium
+folium
+geopandas
+shapely
+pyproj
+pandas
+numpy
+plotly
+geobr
+fiona
+tqdm
+requests
+ultralytics

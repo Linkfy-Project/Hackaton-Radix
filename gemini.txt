@@ -1,1 +1,0 @@
-{"solar_panels":[{"box_2d":[0.818,0.0,1.0,0.255],"confidence":"high"},{"box_2d":[0.773,0.444,0.93,0.556],"confidence":"high"},{"box_2d":[0.703,0.614,0.843,0.822],"confidence":"high"},{"box_2d":[0.493,0.028,0.714,0.078],"confidence":"high"}]}
