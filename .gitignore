@@ -1,26 +1,83 @@
-/ENEL_RJ_383_2022-09-30_V10_20240605-0611.gdb
-/Solar-Panel-Detector-master
-/LIGHT_382_2021-09-30_M10_20231218-2133.gdb
-CNEFE_RJ.csv
-/world
-/mixed
-/tiles_cache
-/tiles_cache
-/tiles_caches
-*.rar
+# -----------------------------
+# Python / Ambiente
+# -----------------------------
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# -----------------------------
+# Cache / Tiles / Temporários
+# -----------------------------
+tiles_cache/
+Solar/tiles_cache/
+**/tiles_cache/
+tiles_caches/
+**/tiles_caches/
+
+# -----------------------------
+# Dados brutos e datasets grandes
+# -----------------------------
+Dados Brutos/
+Dataset/
+ENEL_RJ_383_2022-09-30_V10_20240605-0611.gdb/
+LIGHT_382_2021-09-30_M10_20231218-2133.gdb/
+*.gdb/
+
+# -----------------------------
+# Artefatos de modelo / pesos
+# -----------------------------
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+
+# se quiser ser mais específico:
+# Solar/best.pt
+
+# -----------------------------
+# Bancos / checkpoints locais
+# -----------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# se quiser ser mais específico:
+# Solar/solar_checkpoint.db
+
+# -----------------------------
+# Outputs gerados (opcional, mas recomendado)
+# -----------------------------
+Dados Processados/
+**/*.geojson
+**/*.csv
+
+# Se você quiser manter alguns CSV/GeoJSON versionados,
+# remova as duas linhas acima e ignore só a pasta:
+# Dados Processados/
+
+# -----------------------------
+# Mídias grandes
+# -----------------------------
+*.mp3
+*.mkv
+*.mp4
+*.wav
+
+# -----------------------------
+# Compactados
+# -----------------------------
 *.zip
-/Dados Brutos
-Painel Solar/world/yolov5_X.pt
-New folder/audio_extraido.mp3
-New folder/monitoria.mkv
-/brasilia
-/parque
-/teresina
-/tiles dataset
-Organizar/mapa_alta_resolucao.png
-Organizar/mosaico_circular.png
-Organizar/mosaico_circular_preciso.png
-Organizar/mosaico_circular_precisoo.png
-Organizar/mosaico_voronoi.png
-Organizar/estrutura_gdb.png
-/Dataset
+*.rar
+
+# -----------------------------
+# OS / Editor
+# -----------------------------
+.DS_Store
+Thumbs.db
+.vscode/

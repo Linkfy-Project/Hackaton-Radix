@@ -43,7 +43,10 @@ MAPA_CAMADAS_GDB = {
         'TR_GEOGRAFICO': 'UNTRD', # Transformadores para área real
         'CTMT': 'CTMT', # Circuitos de Média Tensão
         'BAR': 'BAR', # Barras
-        'SSDAT': 'SSDAT' # Segmentos de Alta Tensão
+        'SSDAT': 'SSDAT', # Segmentos de Alta Tensão
+        'UGBT': 'UGBT_tab', # Unidade Geradora de Baixa Tensão
+        'UGMT': 'UGMT_tab', # Unidade Geradora de Média Tensão
+        'UGAT': 'UGAT_tab'  # Unidade Geradora de Alta Tensão
     },
     'ENEL': {
         'SUB': 'SUB',
@@ -51,7 +54,10 @@ MAPA_CAMADAS_GDB = {
         'TR_GEOGRAFICO': 'UNTRMT', # Transformadores de MT para área real de atendimento
         'CTMT': 'CTMT',
         'BAR': 'BAR',
-        'SSDAT': 'SSDAT'
+        'SSDAT': 'SSDAT',
+        'UGBT': 'UGBT_tab',
+        'UGMT': 'UGMT_tab',
+        'UGAT': 'UGAT_tab'
     }
 }
 
@@ -146,7 +152,7 @@ def preencher_buracos_rj(gdf_areas: gpd.GeoDataFrame, gdf_subs_pontos: gpd.GeoDa
                 envelope = buraco.buffer(5000).envelope
                 vor_collection = voronoi_diagram(MultiPoint(coords), envelope=envelope)
                 
-                # Intersectar cada célula do Voronoi com o buraco
+                # Intersectar cada célula do Voronoi with the buraco
                 for celula in vor_collection.geoms:
                     intersecao = celula.intersection(buraco)
                     if not intersecao.is_empty and intersecao.area > 1:
@@ -170,7 +176,7 @@ def preencher_buracos_rj(gdf_areas: gpd.GeoDataFrame, gdf_subs_pontos: gpd.GeoDa
         geom_unificada = unary_union(pecas).buffer(0.1).buffer(-0.1)
         novas_geoms[sid] = geom_unificada
 
-    # Atualizar o GeoDataFrame com as novas geometrias
+    # Atualizar o GeoDataFrame with the novas geometrias
     gdf_areas_proj['geometry'] = gdf_areas_proj['COD_ID'].astype(str).map(novas_geoms)
     
     # Corrigir possíveis invalidezes geométricas após uniões
@@ -338,8 +344,94 @@ def processar_classificacao_e_hierarquia(all_subs_data: List[Dict]) -> pd.DataFr
 
 # --- CORE PIPELINE ---
 
+def processar_geracao_distribuida(caminho_gdb: str, camadas: List[str], cfg: Dict) -> pd.DataFrame:
+    """
+    Extrai e agrupa dados de Micro e Minigeração Distribuída (MMGD) por subestação.
+    Foca nas tabelas UGBT, UGMT e UGAT filtrando por CODGD ou CEG.
+    """
+    print(f"DEBUG: [MMGD] Extraindo dados de geração distribuída de {os.path.basename(caminho_gdb)}...")
+    dfs_geracao = []
+    
+    camadas_geracao = ['UGBT', 'UGMT', 'UGAT']
+    for cam in camadas_geracao:
+        cam_name = cfg.get(cam)
+        if cam_name in camadas:
+            try:
+                # Lendo apenas as colunas necessárias para otimizar
+                gdf = gpd.read_file(caminho_gdb, layer=cam_name)
+                
+                # Filtro: CODGD, CEG_GD ou CEG não nulo/vazio indica MMGD
+                filtro_cols = ['CODGD', 'CEG_GD', 'CEG']
+                mask = pd.Series(False, index=gdf.index)
+                for col in filtro_cols:
+                    if col in gdf.columns:
+                        mask |= (gdf[col].notna() & (gdf[col].astype(str).str.strip() != ''))
+                
+                gdf_gd = gdf[mask].copy()
+                
+                if gdf_gd.empty:
+                    continue
+                
+                # Cálculo da Energia Mensal e Anual
+                # Para UGBT e UGMT: ENE_01 a ENE_12
+                # Para UGAT: ENE_P_01 a ENE_P_12 e ENE_F_01 a ENE_F_12
+                colunas_energia_final = [f'ENE_MMGD_{str(i).zfill(2)}' for i in range(1, 13)]
+                
+                for i in range(1, 13):
+                    mes_str = str(i).zfill(2)
+                    col_saida = f'ENE_MMGD_{mes_str}'
+                    
+                    if cam == 'UGAT':
+                        col_p = f'ENE_P_{mes_str}'
+                        col_f = f'ENE_F_{mes_str}'
+                        val = 0
+                        if col_p in gdf_gd.columns: val += gdf_gd[col_p].fillna(0)
+                        if col_f in gdf_gd.columns: val += gdf_gd[col_f].fillna(0)
+                        gdf_gd[col_saida] = val
+                    else:
+                        col_e = f'ENE_{mes_str}'
+                        if col_e in gdf_gd.columns:
+                            gdf_gd[col_saida] = gdf_gd[col_e].fillna(0)
+                        else:
+                            gdf_gd[col_saida] = 0
+                
+                gdf_gd['ENERGIA_MMGD_ANUAL'] = gdf_gd[colunas_energia_final].sum(axis=1)
+                
+                # Selecionar colunas de interesse
+                cols_interesse = ['SUB', 'POT_INST', 'ENERGIA_MMGD_ANUAL'] + colunas_energia_final
+                dfs_geracao.append(gdf_gd[[c for c in cols_interesse if c in gdf_gd.columns]])
+                
+            except Exception as e:
+                print(f"DEBUG: [MMGD] Erro ao processar camada {cam}: {e}")
+
+    if not dfs_geracao:
+        return pd.DataFrame()
+
+    df_total = pd.concat(dfs_geracao, ignore_index=True)
+    df_total['SUB'] = df_total['SUB'].astype(str).str.strip()
+    
+    # Agrupamento por Subestação
+    agg_dict = {
+        'POT_INST': 'sum',
+        'ENERGIA_MMGD_ANUAL': 'sum'
+    }
+    # Adicionar colunas mensais ao dicionário de agregação
+    for i in range(1, 13):
+        col = f'ENE_MMGD_{str(i).zfill(2)}'
+        if col in df_total.columns:
+            agg_dict[col] = 'sum'
+            
+    df_agrupado = df_total.groupby('SUB').agg(agg_dict).reset_index()
+    
+    # Adicionar contagem de usinas
+    df_count = df_total.groupby('SUB').size().reset_index(name='QTD_USINAS')
+    df_agrupado = df_agrupado.merge(df_count, on='SUB')
+    
+    df_agrupado = df_agrupado.rename(columns={'SUB': 'COD_ID', 'POT_INST': 'TOTAL_MMGD_KW'})
+    return df_agrupado
+
 def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
-    """Extrai subestações, potências, circuitos e topologia para classificação e rastreamento."""
+    """Extrai subestações, potências, circuitos, topologia e MMGD para classificação e rastreamento."""
     nome_arquivo = os.path.basename(caminho_gdb).upper()
     dist = 'ENEL' if 'ENEL' in nome_arquivo else 'LIGHT'
     
@@ -357,7 +449,7 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
             print(f"DEBUG: [Normalização] Renomeando 'NOME' para 'NOM' em {dist}")
             gdf_sub = gdf_sub.rename(columns={'NOME': 'NOM'})
         
-        # 2. Potência Nominal (UNTRS ou UNTRAT)
+        # 2. Potência Nominal (UNTRS or UNTRAT)
         gdf_untrs = None
         if cfg['TR_NOMINAL'] in camadas:
             gdf_untrs = gpd.read_file(caminho_gdb, layer=cfg['TR_NOMINAL'])
@@ -386,6 +478,16 @@ def extrair_dados_completos_gdb(caminho_gdb: str) -> Optional[Dict]:
         gdf_ssdat = None
         if cfg['SSDAT'] in camadas:
             gdf_ssdat = gpd.read_file(caminho_gdb, layer=cfg['SSDAT'])
+
+        # 6. Geração Distribuída (MMGD)
+        df_mmgd = processar_geracao_distribuida(caminho_gdb, camadas, cfg)
+        if not df_mmgd.empty:
+            gdf_sub = gdf_sub.merge(df_mmgd, on='COD_ID', how='left')
+            # Preencher zeros para as novas colunas
+            cols_fill = ['TOTAL_MMGD_KW', 'QTD_USINAS', 'ENERGIA_MMGD_ANUAL'] + [f'ENE_MMGD_{str(i).zfill(2)}' for i in range(1, 13)]
+            for c in cols_fill:
+                if c in gdf_sub.columns:
+                    gdf_sub[c] = gdf_sub[c].fillna(0)
         
         gdf_sub['DISTRIBUIDORA'] = dist
         gdf_sub['FONTE_GDB'] = os.path.basename(caminho_gdb)
@@ -462,9 +564,14 @@ def run_pipeline():
     gdf_subs_all = pd.concat([d['subs'] for d in all_subs_data], ignore_index=True)
     gdf_subs_all['COD_ID'] = gdf_subs_all['COD_ID'].astype(str)
     
-    # Merge potência com as áreas para ordenar
+    # Merge potência e MMGD com as áreas para ordenar e enriquecer
     gdf_areas['COD_ID'] = gdf_areas['COD_ID'].astype(str)
-    gdf_areas = gdf_areas.merge(gdf_subs_all[['COD_ID', 'POTENCIA_CALCULADA', 'NOM', 'DISTRIBUIDORA']], on='COD_ID', how='left')
+    
+    # Colunas de MMGD que queremos preservar
+    cols_mmgd = ['TOTAL_MMGD_KW', 'QTD_USINAS', 'ENERGIA_MMGD_ANUAL'] + [f'ENE_MMGD_{str(i).zfill(2)}' for i in range(1, 13)]
+    cols_to_merge = ['COD_ID', 'POTENCIA_CALCULADA', 'NOM', 'DISTRIBUIDORA'] + [c for c in cols_mmgd if c in gdf_subs_all.columns]
+    
+    gdf_areas = gdf_areas.merge(gdf_subs_all[cols_to_merge], on='COD_ID', how='left')
     
     # Lógica de Prioridade: Subestações que estão dentro de outras áreas devem ser processadas primeiro
     # para garantir que "esculpam" seu espaço e não sejam absorvidas pela subestação maior.
@@ -531,15 +638,23 @@ def run_pipeline():
     gdf_subs_all = gdf_subs_all.to_crs("EPSG:4326")
     gdf_subs_all['lat_sub'], gdf_subs_all['lon_sub'] = gdf_subs_all.geometry.y, gdf_subs_all.geometry.x
     
-    # Merge das coordenadas de volta para o GeoDataFrame de áreas
-    cols_to_merge = ['COD_ID', 'lat_sub', 'lon_sub']
+    # Merge das coordenadas e MMGD de volta para o GeoDataFrame de áreas
+    cols_to_merge_final = ['COD_ID', 'lat_sub', 'lon_sub']
     if 'POT_NOM' in gdf_subs_all.columns:
-        cols_to_merge.append('POT_NOM')
+        cols_to_merge_final.append('POT_NOM')
+    
+    # Adicionar colunas de MMGD ao merge final para garantir que não sejam perdidas
+    for c in cols_mmgd:
+        if c in gdf_subs_all.columns:
+            cols_to_merge_final.append(c)
         
     gdf_final_geo = gdf_final_geo.merge(
-        gdf_subs_all[cols_to_merge], 
-        on='COD_ID', how='left'
+        gdf_subs_all[cols_to_merge_final], 
+        on='COD_ID', how='left', suffixes=('', '_drop')
     )
+    
+    # Remover colunas duplicadas se houver
+    gdf_final_geo = gdf_final_geo.loc[:, ~gdf_final_geo.columns.str.endswith('_drop')]
 
     # 3.5 Classificação e Hierarquia
     df_class = processar_classificacao_e_hierarquia(all_subs_data)
