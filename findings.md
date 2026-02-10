@@ -342,3 +342,4 @@ O consumo varia de mês para mês, e o BDGD registra essa variação. Se você q
 Ficou mais claro como o dado é organizado? Se quiser, posso rodar um comando para somar o consumo de Janeiro (`ENE_01`) daquela subestação 1240 para você ver o número total.
 
 
+
