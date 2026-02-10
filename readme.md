@@ -55,3 +55,4 @@ streamlit run main.py
 *   **Streamlit & Folium**: Interface web e mapas interativos.
 *   **Geobr**: Integração com malhas territoriais oficiais do IBGE.
 *   **Requests & Overpass API**: Coleta de dados do OpenStreetMap.
+
